@@ -1,0 +1,20 @@
+services:
+  vector-db:
+    image: pgvector/pgvector:pg18
+    container_name: pgvector_cvertidor_rag
+    restart: unless-stopped
+
+    ports:
+      - "5432:5432"
+
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - ./init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+
+volumes:
+  pgdata:
