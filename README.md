@@ -2,7 +2,7 @@
 
 [![Abrir en Google Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/pepestack/CVertidor/blob/master/CVertidor.ipynb)
 
-CVertidor es una herramienta de inteligencia artificial generativa que adapta un currículum a una oferta de trabajo mediante un flujo de **RAG (Retrieval-Augmented Generation)**. Extrae la información del candidato, la divide en fragmentos, genera embeddings y la almacena temporalmente en PostgreSQL con `pgvector`. Después recupera los fragmentos más relevantes para generar un CV orientado a la oferta, sin inventar experiencias ni datos.
+CVertidor es una herramienta de inteligencia artificial generativa que adapta un currículum a una oferta de trabajo mediante un flujo de **RAG (Retrieval-Augmented Generation)**. Extrae la información del candidato, la divide en fragmentos, genera embeddings y la almacena en PostgreSQL con `pgvector`. Después recupera los fragmentos más relevantes para generar un CV orientado a la oferta, sin inventar experiencias ni datos.
 
 El resultado se puede visualizar y guardar en dos formatos:
 
@@ -168,18 +168,4 @@ Para una ejecución local, el notebook carga `DB_URL` y `API_KEY` desde `.env`; 
 - El proyecto no incluye una interfaz web ni un servicio HTTP; la interfaz actual es el notebook.
 - La generación depende de una API de Google cuando se usa Gemini como modelo principal.
 - El fallback de embeddings requiere descargar el modelo de Hugging Face la primera vez.
-- El flujo elimina la colección vectorial anterior antes de insertar el CV actual. Está pensado para trabajar con un CV por ejecución, no como repositorio multiusuario.
 - No subas `.env`, claves API ni currículums reales al repositorio. `.env` ya está excluido por [`.gitignore`](./.gitignore).
-
-## Contribuir
-
-Las mejoras son bienvenidas. Para contribuir:
-
-1. Crea una rama descriptiva a partir de `master`.
-2. Realiza cambios pequeños y enfocados.
-3. Verifica el notebook y la conexión a PostgreSQL/pgvector antes de abrir un pull request.
-4. Describe en el pull request qué cambió y cómo se validó.
-
-## Licencia
-
-Este repositorio no incluye actualmente un archivo `LICENSE`. Consulta con los mantenedores antes de redistribuir el código o incorporarlo en otro proyecto.
