@@ -22,6 +22,8 @@ El proyecto está implementado principalmente en el notebook [`CVertidor.ipynb`]
 
 ## Arquitectura del flujo
 
+![Arquitectura del Sistema](./Diagrama.png)
+
 1. Se ingresan el currículum y la oferta de trabajo como texto.
 2. Gemini estructura el currículum en un esquema `StandardCV`.
 3. El contenido se transforma en documentos y fragmentos semánticos.
