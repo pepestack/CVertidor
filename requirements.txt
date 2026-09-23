@@ -1,0 +1,14 @@
+langchain-text-splitters
+langchain-core
+langchain-google-genai
+langchain-classic
+langchain-community
+pydantic
+langchain-postgres
+psycopg[binary]
+pandas
+google-genai
+python-dotenv
+ipython
+sentence-transformers
+langchain-huggingface
