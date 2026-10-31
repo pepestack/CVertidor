@@ -29,16 +29,20 @@ def openrouter_capabilities() -> dict[str, frozenset[str]]:
 
 def pick_structured_method(supported: frozenset[str] | None) -> str:
     """Elige cómo pedir salida estructurada según lo que soporta el modelo:
-    - json_schema: el proveedor valida el esquema (lo más confiable)
     - function_calling: se fuerza una herramienta con el esquema como argumentos
+    - json_schema: decodificación restringida por el proveedor
     - json_mode: solo garantiza JSON válido, el esquema va en el prompt
+
+    function_calling va primero: con nemotron-3.5-super-vl, json_schema borró la palabra
+    "Español" de "Español: Nativo" en todas las corridas, mientras function_calling la
+    conservó con la misma velocidad y el mismo resultado en el resto de campos.
     """
     if not supported:
         return "function_calling"
-    if "structured_outputs" in supported:
-        return "json_schema"
     if "tools" in supported:
         return "function_calling"
+    if "structured_outputs" in supported:
+        return "json_schema"
     if "response_format" in supported:
         return "json_mode"
     return "function_calling"

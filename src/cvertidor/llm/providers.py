@@ -10,7 +10,7 @@ from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
-from langchain_core.runnables import Runnable
+from langchain_core.runnables import Runnable, RunnableLambda
 
 from cvertidor.config import Settings, get_settings
 from cvertidor.llm.capabilities import openrouter_capabilities, pick_structured_method
@@ -18,13 +18,16 @@ from cvertidor.llm.capabilities import openrouter_capabilities, pick_structured_
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 PROVIDERS = ("openrouter", "google")
 
-# Parámetros de generación por rol (temperatura baja donde importa la fidelidad a los datos)
+# Parámetros de generación por rol (temperatura baja donde importa la fidelidad a los datos).
+# reasoning: los modelos de razonamiento gratuitos pueden gastar todos los tokens de salida
+# pensando y no alcanzar a escribir el JSON; en extracción y generación se desactiva
+# (medido: 7.9 s vs. error a los 29 s con el CV de ejemplo)
 ROLE_PARAMS: dict[str, dict[str, Any]] = {
-    "parser": {"temperature": 0.0, "max_tokens": 4096},
-    "job": {"temperature": 0.0, "max_tokens": 2048},
-    "generator": {"temperature": 0.1, "top_p": 0.9, "max_tokens": 4096},
-    "refiner": {"temperature": 0.2, "max_tokens": 4096},
-    "escalation": {"temperature": 0.0, "max_tokens": 2048},
+    "parser": {"temperature": 0.0, "max_tokens": 8192, "reasoning": {"enabled": False}},
+    "job": {"temperature": 0.0, "max_tokens": 2048, "reasoning": {"enabled": False}},
+    "generator": {"temperature": 0.1, "top_p": 0.9, "max_tokens": 8192, "reasoning": {"enabled": False}},
+    "refiner": {"temperature": 0.2, "max_tokens": 4096, "reasoning": {"effort": "low"}},
+    "escalation": {"temperature": 0.0, "max_tokens": 2048, "reasoning": {"effort": "low"}},
 }
 
 
@@ -50,11 +53,29 @@ class ModelSpec:
         return f"{self.provider}:{self.model}"
 
 
+def openrouter_extra_body(
+    spec: ModelSpec,
+    role: str,
+    capabilities: dict[str, frozenset[str]] | None = None,
+) -> dict[str, Any] | None:
+    """Parámetros propios de OpenRouter; el de razonamiento solo si el modelo lo soporta"""
+    reasoning = ROLE_PARAMS[role].get("reasoning")
+    if not reasoning:
+        return None
+    caps = capabilities if capabilities is not None else openrouter_capabilities()
+    supported = caps.get(spec.model)
+    # Catálogo no disponible: se envía igual (OpenRouter ignora el parámetro si no aplica)
+    if supported is not None and "reasoning" not in supported:
+        return None
+    return {"reasoning": reasoning}
+
+
 def build_chat_model(
     spec: ModelSpec,
     role: str,
     settings: Settings | None = None,
     max_retries: int | None = None,
+    capabilities: dict[str, frozenset[str]] | None = None,
 ) -> BaseChatModel:
     """Instancia el modelo de un proveedor traduciendo los parámetros comunes"""
     settings = settings or get_settings()
@@ -67,6 +88,7 @@ def build_chat_model(
         from langchain_openai import ChatOpenAI
 
         return ChatOpenAI(
+            extra_body=openrouter_extra_body(spec, role, capabilities),
             model=spec.model,
             api_key=settings.openrouter_api_key,
             base_url=OPENROUTER_BASE_URL,
@@ -130,13 +152,15 @@ def _build_chain(
     role: str,
     adapt: Callable[[BaseChatModel, ModelSpec], Runnable],
     settings: Settings | None = None,
+    capabilities: dict[str, frozenset[str]] | None = None,
 ) -> Runnable:
     settings = settings or get_settings()
     specs, _ = role_specs(role, settings)
     last = len(specs) - 1
     # Solo el último modelo reintenta: ante un 429 los anteriores ceden de inmediato al respaldo
     return with_model_fallbacks([
-        adapt(build_chat_model(spec, role, settings, max_retries=None if i == last else 0), spec)
+        adapt(build_chat_model(spec, role, settings, max_retries=None if i == last else 0,
+                               capabilities=capabilities), spec)
         for i, spec in enumerate(specs)
     ])
 
@@ -160,12 +184,33 @@ def get_structured_model(
 
     def adapt(model: BaseChatModel, spec: ModelSpec) -> Runnable:
         method = resolve_structured_method(spec, override, capabilities)
-        kwargs = {"include_raw": include_raw}
+        kwargs = {"include_raw": True}
         if method:
             kwargs["method"] = method
-        return model.with_structured_output(schema, **kwargs)
+        # Con include_raw los errores de validación se devuelven en vez de lanzarse; se
+        # lanzan aquí para que la cadena pruebe el siguiente modelo
+        checked = model.with_structured_output(schema, **kwargs) | RunnableLambda(_require_parsed)
+        return checked if include_raw else checked | RunnableLambda(lambda result: result["parsed"])
 
-    return _build_chain(role, adapt, settings)
+    return _build_chain(role, adapt, settings, capabilities)
+
+
+class StructuredOutputError(ValueError):
+    """El modelo respondió, pero su salida no cumple el esquema pedido"""
+
+    def __init__(self, message: str, raw: Any = None):
+        super().__init__(message)
+        self.raw = raw
+
+
+def _require_parsed(result: dict) -> dict:
+    if result.get("parsed") is None:
+        raw = result.get("raw")
+        model = (getattr(raw, "response_metadata", None) or {}).get("model_name")
+        finish = (getattr(raw, "response_metadata", None) or {}).get("finish_reason")
+        error = str(result.get("parsing_error") or "salida vacía").replace("\n", " ")
+        raise StructuredOutputError(f"{model or 'modelo'} (finish_reason={finish}): {error[:300]}", raw)
+    return result
 
 
 def get_tool_model(role: str, tools: Sequence[Any], settings: Settings | None = None) -> Runnable:

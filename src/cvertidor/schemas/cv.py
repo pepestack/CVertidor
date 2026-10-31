@@ -1,8 +1,25 @@
 """Modelos de Pydantic para validar la estructura de un currículum."""
 
-from typing import List, Optional
+from typing import Any, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# Valores que algunos modelos escriben como texto en vez de dejar el campo vacío
+EMPTY_MARKERS = {"", "none", "null", "n/a", "na", "ninguno", "ninguna", "-"}
+
+
+def _empty_to_none(value: Any) -> Any:
+    if isinstance(value, str) and value.strip().lower() in EMPTY_MARKERS:
+        return None
+    return value
+
+
+def _lenient_list(value: Any) -> Any:
+    """'none' -> None y un string suelto -> lista de un elemento"""
+    value = _empty_to_none(value)
+    if isinstance(value, str):
+        return [value]
+    return value
 
 
 class Certification(BaseModel):
@@ -10,16 +27,36 @@ class Certification(BaseModel):
     issuing_organization: Optional[str] = Field(None, description="Organización que emitió la certificación o licencia.")
     issue_date: Optional[str] = Field(None, description="Fecha de emisión, obtención o vigencia indicada.")
 
+    @field_validator("issuing_organization", "issue_date", mode="before")
+    @classmethod
+    def _optional_text(cls, value: Any) -> Any:
+        return _empty_to_none(value)
+
 class WorkExperience(BaseModel):
     company: str = Field(description="Empresa u organización donde trabajó.")
     role: str = Field(description="Cargo o puesto desempeñado.")
     duration: Optional[str] = Field(None, description="Período de trabajo, incluyendo inicio y término si aparecen.")
     responsibilities: List[str] = Field(default_factory=list, description="Responsabilidades, tareas, contribuciones y logros del cargo.")
 
+    @field_validator("duration", mode="before")
+    @classmethod
+    def _optional_text(cls, value: Any) -> Any:
+        return _empty_to_none(value)
+
+    @field_validator("responsibilities", mode="before")
+    @classmethod
+    def _responsibilities(cls, value: Any) -> Any:
+        return _lenient_list(value) or []
+
 class Education(BaseModel):
     institution: str = Field(description="Universidad u otra Institución educativa.")
     degree: str = Field(description="Título, grado, carrera o programa académico.")
     year: Optional[str] = Field(None, description="Año o período de graduación, egreso o finalización.")
+
+    @field_validator("year", mode="before")
+    @classmethod
+    def _optional_text(cls, value: Any) -> Any:
+        return _empty_to_none(value)
 
 
 # 2. CV Estandar
@@ -55,3 +92,18 @@ class StandardCV(BaseModel):
         default=None,
         description="Intereses y actividades extracurriculares relevantes."
     )
+
+    @field_validator("email", "phone", "location", "linkedin_url", "portfolio_url", "professional_summary", mode="before")
+    @classmethod
+    def _optional_text(cls, value: Any) -> Any:
+        return _empty_to_none(value)
+
+    @field_validator("technical_skills", "certifications", "languages", "interests", mode="before")
+    @classmethod
+    def _optional_lists(cls, value: Any) -> Any:
+        return _lenient_list(value)
+
+    @field_validator("education", "work_history", mode="before")
+    @classmethod
+    def _required_lists(cls, value: Any) -> Any:
+        return _lenient_list(value) or []

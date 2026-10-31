@@ -4,6 +4,15 @@ from cvertidor.config import Settings
 from cvertidor.schemas.cv import Certification, Education, StandardCV, WorkExperience
 
 
+@pytest.fixture(autouse=True)
+def sin_catalogo_de_openrouter(monkeypatch):
+    """Ningún test consulta el catálogo de modelos por red"""
+    from cvertidor.llm import capabilities, providers
+
+    monkeypatch.setattr(capabilities, "openrouter_capabilities", lambda: {})
+    monkeypatch.setattr(providers, "openrouter_capabilities", lambda: {})
+
+
 @pytest.fixture
 def entorno_limpio(monkeypatch, tmp_path):
     """Sin variables del sistema ni el .env real del proyecto"""

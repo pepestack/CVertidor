@@ -1,0 +1,21 @@
+Data Engineer (1 vacantes) Controladores (as) / Controller Procesos - Otras ocupaciones
+DATOS DE CONTACTO
+Empresa:
+Banco Falabella
+Actividad económica:
+Actividades bancarias
+DESCRIPCIÓN
+
+Misión del cargo: Velar por el modelamiento, explotación y exposición de datos para apoyar decisiones comerciales y financieras. ¡Buscamos un/a Data Engineer para Banco Falabella! ¿Te apasiona transformar datos en decisiones estratégicas? ¿Te interesa trabajar en un equipo que combina lo técnico con conocimientos del negocio? ¡Esta es tu oportunidad para hacer que las cosas pasen! Responsabilidades clave Modelar y explotar datos utilizando SQL, Python y herramientas de bases de datos (GCP, SQL Server, etc.). Implementar y presentar KPI financieros y comerciales mediante herramientas de visualización como Power BI y Looker. Diseñar soluciones con herramientas de IA (Copilot, Gemini, etc.). Automatizar procesos de datos utilizando herramientas como GCP, Python o DBT. Levantar flujos tecnológicos para monitoreo y generar reportes analíticos para equipos comerciales y financieros. Requisitos... (Más información al postular)
+Metropolitana, Las Condes
+16/09/2026 - 21/10/2026
+Reservado
+Jornada Completa
+REQUISITOS SOLICITADOS
+Nivel educacional: Título Ingeniería Civil Informática. Ingeniería en Informática. Ingeniería Civil Industrial o afín
+Experiencia:
+No requerida
+
+CARACTERÍSTICAS
+Tipo de contrato:
+Contrato indefinido
