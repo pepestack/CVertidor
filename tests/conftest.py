@@ -1,6 +1,24 @@
 import pytest
 
+from cvertidor.config import Settings
 from cvertidor.schemas.cv import Certification, Education, StandardCV, WorkExperience
+
+
+@pytest.fixture
+def entorno_limpio(monkeypatch, tmp_path):
+    """Sin variables del sistema ni el .env real del proyecto"""
+    for name in list(Settings.model_fields) + ["DB_URL", "OPENROUTER_API_KEY", "GOOGLE_API_KEY", "API_KEY", "OUTPUT_DIR"]:
+        monkeypatch.delenv(name.upper(), raising=False)
+    monkeypatch.chdir(tmp_path)
+
+
+@pytest.fixture
+def make_settings(entorno_limpio):
+    """Settings de prueba con una clave falsa de OpenRouter (nunca se llama a la red)"""
+    def factory(**overrides) -> Settings:
+        values = {"openrouter_api_key": "sk-or-prueba"} | overrides
+        return Settings(**values)
+    return factory
 
 
 @pytest.fixture

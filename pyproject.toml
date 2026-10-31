@@ -22,6 +22,8 @@ dependencies = [
     "psycopg[binary]>=3.3",
     "google-genai>=2.25",
     "sentence-transformers>=6.1",
+    "langchain-openai>=1.7.3",
+    "httpx>=0.28.1",
 ]
 
 [project.scripts]
