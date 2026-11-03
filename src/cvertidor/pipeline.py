@@ -1,29 +1,22 @@
-"""Flujo completo del notebook como funciones: extraer el CV, indexarlo, recuperar
-lo relevante para la oferta, generar el CV adaptado y guardarlo en Markdown y HTML.
+"""Etapas del flujo como funciones: extraer el CV, generar el CV adaptado y guardarlo.
 
-En el batch 4 estas etapas pasan a ser nodos de un grafo de LangGraph.
+Los nodos del grafo de LangGraph (cvertidor.graph) las orquestan y deciden el orden,
+los reintentos y los caminos alternativos.
 """
 
 import re
 import time
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from langchain_core.documents import Document
 from pydantic import BaseModel
 
-from cvertidor.config import Settings, get_settings
+from cvertidor.config import Settings
 from cvertidor.ingestion.pii import MaskResult, mask_pii, unmask
-from cvertidor.llm.embeddings import EmbeddingsInfo, get_embeddings
 from cvertidor.llm.providers import StructuredOutputError, get_structured_model
 from cvertidor.prompts.generation import GENERATION_PROMPT
 from cvertidor.prompts.parsing import PARSING_PROMPT
-from cvertidor.rag.chunking import create_cv_documents, make_candidate_id
-from cvertidor.rag.retrieval import ALWAYS_INCLUDED_SECTIONS, build_retriever, format_docs, similarity_threshold
-from cvertidor.rag.vector_store import SyncStats, get_vector_store, sync_candidate_docs
-from cvertidor.render import cv_to_html, cv_to_markdown
 from cvertidor.schemas.cv import StandardCV
 
 MIN_CV_LENGTH = 50              # Largo minimo de CV
@@ -38,7 +31,7 @@ class InputError(ValueError):
 
 
 class GenerationError(RuntimeError):
-    """El modelo no devolvió un StandardCV válido"""
+    """El modelo no devolvió una salida válida para el esquema pedido"""
 
 
 @dataclass
@@ -48,21 +41,6 @@ class StepMetrics:
     model: str | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
-
-
-@dataclass
-class PipelineResult:
-    candidate_id: str
-    parsed_cv: StandardCV
-    adapted_cv: StandardCV
-    markdown: str
-    html: str
-    output_paths: list[Path]
-    retrieved_docs: list[Document]
-    sync: SyncStats
-    embeddings_model: str
-    warnings: list[str] = field(default_factory=list)
-    metrics: list[StepMetrics] = field(default_factory=list)
 
 
 def validate_text(text: str | None, min_length: int, label: str) -> str:
@@ -107,13 +85,13 @@ def restore_contact(parsed: StandardCV, masked: MaskResult, original_text: str) 
     return restored, removed
 
 
-def _metrics(step: str, start: float, raw: Any = None) -> StepMetrics:
+def step_metrics(step: str, start: float, raw: Any = None) -> StepMetrics:
     usage = getattr(raw, "usage_metadata", None) or {}
     model = (getattr(raw, "response_metadata", None) or {}).get("model_name")
     return StepMetrics(step, time.perf_counter() - start, model, usage.get("input_tokens"), usage.get("output_tokens"))
 
 
-def _invoke_structured(chain, inputs: dict, what: str):
+def invoke_structured(chain, inputs: dict, what: str):
     try:
         result = chain.invoke(inputs)
     except StructuredOutputError as error:
@@ -132,22 +110,41 @@ def parse_cv(cv_text: str, settings: Settings) -> tuple[StandardCV, list[str], A
     """Estructura el CV original. El modelo solo ve el texto con la PII enmascarada"""
     masked = mask_pii(cv_text)
     chain = PARSING_PROMPT | get_structured_model("parser", StandardCV, include_raw=True, settings=settings)
-    parsed, raw = _invoke_structured(chain, {"cv_text": masked.text}, "StandardCV del CV original")
+    parsed, raw = invoke_structured(chain, {"cv_text": masked.text}, "StandardCV del CV original")
     restored, removed = restore_contact(parsed, masked, cv_text)
     return restored, removed, raw
 
 
-def generate_adapted_cv(context: str, job_text: str, parsed_cv: StandardCV, settings: Settings) -> tuple[StandardCV, Any]:
+def generate_adapted_cv(
+    context: str,
+    job_text: str,
+    parsed_cv: StandardCV,
+    settings: Settings,
+    plan: str = "",
+) -> tuple[StandardCV, Any]:
     chain = GENERATION_PROMPT | get_structured_model("generator", StandardCV, include_raw=True, settings=settings)
-    adapted, raw = _invoke_structured(
-        chain, {"context": context, "job_description": mask_pii(job_text).text}, "StandardCV adaptado"
+    adapted, raw = invoke_structured(
+        chain,
+        {"context": context, "job_description": mask_pii(job_text).text, "plan": plan or "- Sin instrucciones adicionales."},
+        "StandardCV adaptado",
     )
     # Nombre y datos de contacto se copian del CV original, no del modelo
     adapted.candidate_name = parsed_cv.candidate_name
     adapted.location = parsed_cv.location
     for name in CONTACT_FIELDS:
         setattr(adapted, name, getattr(parsed_cv, name))
+    restore_roles(adapted, parsed_cv)
     return adapted, raw
+
+
+def restore_roles(adapted: StandardCV, original: StandardCV) -> None:
+    """Los cargos se conservan textualmente aunque el CV se traduzca (los modelos los
+    traducen pese a la instrucción); se emparejan por empresa"""
+    roles = {_compact(w.company): w.role for w in original.work_history}
+    for work in adapted.work_history:
+        role = roles.get(_compact(work.company))
+        if role:
+            work.role = role
 
 
 def ensure_db_available(db_url: str) -> None:
@@ -164,73 +161,3 @@ def save_outputs(candidate_id: str, markdown: str, html: str, output_dir: Path) 
     paths[0].write_text(markdown, encoding="utf-8")
     paths[1].write_text(html, encoding="utf-8")
     return paths
-
-
-def run_pipeline(
-    cv_text: str,
-    job_text: str,
-    settings: Settings | None = None,
-    embeddings_info: EmbeddingsInfo | None = None,
-    on_step: Callable[[str], None] = lambda message: None,
-) -> PipelineResult:
-    settings = settings or get_settings()
-    cv_text = validate_text(cv_text, MIN_CV_LENGTH, "El CV")
-    job_text = validate_text(job_text, MIN_JOB_DESC_LENGTH, "La oferta de trabajo")
-    db_url = settings.require_db_url()
-    ensure_db_available(db_url)
-    warnings: list[str] = []
-    metrics: list[StepMetrics] = []
-
-    on_step("Extrayendo la estructura del CV (datos personales enmascarados)...")
-    start = time.perf_counter()
-    parsed_cv, removed, raw = parse_cv(cv_text, settings)
-    metrics.append(_metrics("parse", start, raw))
-    if removed:
-        warnings.append("Se descartaron datos de contacto que no están en el CV original: " + ", ".join(removed))
-
-    candidate_id = make_candidate_id(parsed_cv.candidate_name)
-    docs = create_cv_documents(parsed_cv)
-
-    on_step(f"Indexando {len(docs)} fragmentos en pgvector...")
-    start = time.perf_counter()
-    embeddings_info = embeddings_info or get_embeddings(settings)
-    if embeddings_info.is_fallback:
-        warnings.append(f"Se usaron embeddings locales ({embeddings_info.model}) porque el proveedor no respondió.")
-    vector_store = get_vector_store(embeddings_info.embeddings, embeddings_info.slug, db_url)
-    sync = sync_candidate_docs(vector_store, db_url, candidate_id, docs)
-    metrics.append(_metrics("index", start))
-
-    on_step("Recuperando la experiencia relevante para la oferta...")
-    start = time.perf_counter()
-    retriever = build_retriever(
-        vector_store, embeddings_info.embeddings, candidate_id, similarity_threshold(embeddings_info.slug)
-    )
-    retrieved_docs = retriever.invoke(job_text)
-    metrics.append(_metrics("retrieve", start))
-    if not any(d.metadata.get("section") == "work_history" for d in retrieved_docs):
-        warnings.append("Ninguna experiencia laboral superó el filtro de similitud; revise el umbral.")
-
-    always_included = [d for d in docs if d.metadata["section"] in ALWAYS_INCLUDED_SECTIONS]
-    context = format_docs(retrieved_docs + always_included)
-
-    on_step("Generando el CV adaptado a la oferta...")
-    start = time.perf_counter()
-    adapted_cv, raw = generate_adapted_cv(context, job_text, parsed_cv, settings)
-    metrics.append(_metrics("generate", start, raw))
-
-    markdown, html = cv_to_markdown(adapted_cv), cv_to_html(adapted_cv)
-    paths = save_outputs(candidate_id, markdown, html, settings.output_dir)
-
-    return PipelineResult(
-        candidate_id=candidate_id,
-        parsed_cv=parsed_cv,
-        adapted_cv=adapted_cv,
-        markdown=markdown,
-        html=html,
-        output_paths=paths,
-        retrieved_docs=retrieved_docs,
-        sync=sync,
-        embeddings_model=embeddings_info.model,
-        warnings=warnings,
-        metrics=metrics,
-    )

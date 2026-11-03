@@ -28,7 +28,26 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--cv", required=True, help="Ruta al CV (.txt, .md, .pdf o .docx)")
     run.add_argument("--job", required=True, help="Ruta a la oferta de trabajo (.txt, .md, .pdf o .docx)")
     run.add_argument("--salida", help="Carpeta de salida (por defecto OUTPUT_DIR o ./output)")
+
+    graph = subparsers.add_parser("graph", help="Exporta el diagrama del grafo de LangGraph en Mermaid")
+    graph.add_argument("--salida", help="Archivo .mmd o .md donde guardarlo (por defecto se imprime)")
     return parser
+
+
+def cmd_graph(args: argparse.Namespace) -> int:
+    from cvertidor.graph import graph_mermaid
+
+    mermaid = graph_mermaid()
+    if not args.salida:
+        print(mermaid)
+        return 0
+    path = Path(args.salida)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # En .md se envuelve en un bloque ```mermaid para que GitHub lo dibuje
+    content = f"```mermaid\n{mermaid}\n```\n" if path.suffix == ".md" else mermaid
+    path.write_text(content, encoding="utf-8")
+    print(f"Diagrama guardado en {path}")
+    return 0
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -38,7 +57,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     from cvertidor.ingestion.loaders import DocumentLoadError, load_text
     from cvertidor.llm.check import error_status
     from cvertidor.llm.providers import ModelConfigError
-    from cvertidor.pipeline import GenerationError, InputError, run_pipeline
+    from cvertidor.graph.runner import run_agent
+    from cvertidor.pipeline import GenerationError, InputError
 
     settings = get_settings()
     if args.salida:
@@ -46,7 +66,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     try:
         cv_text, job_text = load_text(args.cv), load_text(args.job)
-        result = run_pipeline(cv_text, job_text, settings, on_step=lambda m: print(f"-> {m}"))
+        result = run_agent(cv_text, job_text, settings, on_step=lambda m: print(f"-> {m}"))
     except (DocumentLoadError, InputError, ModelConfigError, GenerationError) as error:
         print(f"Error: {error}")
         return 2
@@ -71,10 +91,19 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"Detalle: {str(error).strip()[:200]}")
         return 3
 
+    plan = result.plan
     print(f"\nCandidato: {result.parsed_cv.candidate_name} ({result.candidate_id})")
+    print(f"Oferta: {result.job_reqs.title or 'sin título'} | "
+          f"{len(result.job_reqs.must_have)} requisitos obligatorios, {len(result.job_reqs.nice_to_have)} deseables")
+    coverage = f"{plan.skill_coverage:.0%}" if plan.skill_coverage is not None else "sin requisitos"
+    print(f"Plan: salida en {plan.output_language}{' (traducción)' if plan.translate else ''}, "
+          f"cobertura de requisitos {coverage}, prioridad {' > '.join(plan.section_priority)}")
+    if plan.missing_requirements:
+        print(f"  Requisitos ausentes en el CV: {', '.join(plan.missing_requirements)}")
     print(f"Fragmentos: {result.sync.added} nuevos, {result.sync.removed} eliminados, "
           f"{result.sync.unchanged} sin cambios (embeddings: {result.embeddings_model})")
-    print(f"Recuperados para la oferta: {len(result.retrieved_docs)}")
+    print(f"Recuperados para la oferta: {len(result.retrieved_docs)} "
+          f"en {result.retrieval_attempts} intento{'s' if result.retrieval_attempts != 1 else ''}")
     for m in result.metrics:
         tokens = f", {m.input_tokens} -> {m.output_tokens} tokens" if m.input_tokens is not None else ""
         model = f", {m.model}" if m.model else ""
@@ -84,6 +113,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     print("\nArchivos generados:")
     for path in result.output_paths:
         print(f"  {path}")
+    print(f"Auditoría: {settings.log_dir / 'audit.jsonl'} (run_id {result.run_id})")
     return 0
 
 
@@ -113,6 +143,7 @@ def cmd_check_models(args: argparse.Namespace) -> int:
 
 COMMANDS = {
     "check-models": cmd_check_models,
+    "graph": cmd_graph,
     "run": cmd_run,
 }
 

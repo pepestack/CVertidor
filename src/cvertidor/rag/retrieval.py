@@ -14,7 +14,10 @@ ALWAYS_INCLUDED_SECTIONS = ["education", "languages"]
 # Umbral de similitud del filtro por modelo de embeddings: cada modelo tiene su propia
 # escala de similitud coseno, por eso se calibra por separado
 SIMILARITY_THRESHOLDS = {
-    "google": 0.65,
+    # gemini-embedding-2 comprime la escala: con el CV de samples/, la experiencia queda en
+    # 0.66-0.78 frente a una oferta afín y en 0.65-0.69 frente a una ajena (chef). El 0.65
+    # del notebook dejaba pasar todo
+    "google": 0.70,
     "minilm": 0.3,
     # Calibrado con el CV y la oferta de samples/: lo relevante queda en 0.42-0.50 y lo
     # ajeno (BPMN, PowerPoint, intereses, idiomas) bajo 0.30

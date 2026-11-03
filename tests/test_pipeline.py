@@ -4,6 +4,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableLambda
 
 from cvertidor import pipeline
+from cvertidor.graph import runner
 from cvertidor.ingestion.pii import mask_pii
 from cvertidor.pipeline import GenerationError, InputError, restore_contact, validate_text
 from cvertidor.rag.retrieval import format_docs, similarity_threshold
@@ -70,6 +71,23 @@ def test_generate_copia_contacto_del_cv_original(monkeypatch, make_settings):
     assert result.professional_summary == "Perfil"
 
 
+def test_generate_conserva_los_cargos_originales(monkeypatch, make_settings, sample_cv):
+    from cvertidor.schemas.cv import WorkExperience
+
+    translated = StandardCV(candidate_name="x", work_history=[
+        WorkExperience(company="Grupo Financiero e Inversiones del Pacífico S.A.", role="Data Process Controller"),
+        WorkExperience(company="Empresa Inventada", role="CTO"),
+    ])
+    monkeypatch.setattr(pipeline, "get_structured_model",
+                        _fake_structured({"parsed": translated, "raw": AIMessage(content=""), "parsing_error": None}))
+
+    result, _ = pipeline.generate_adapted_cv("contexto", "oferta", sample_cv, make_settings())
+
+    assert result.work_history[0].role == "Data Engineer & Controller de Procesos de Datos"
+    # Una empresa que no está en el CV original no se toca aquí (la validación del batch 6 la detecta)
+    assert result.work_history[1].role == "CTO"
+
+
 def test_generate_sin_salida_valida_da_error(monkeypatch, make_settings):
     raw = AIMessage(content="", response_metadata={"finish_reason": "length"})
     monkeypatch.setattr(pipeline, "get_structured_model",
@@ -114,7 +132,7 @@ def test_format_docs_agrupa_responsabilidades_por_cargo():
 
 
 def test_umbral_por_modelo_de_embeddings():
-    assert similarity_threshold("google") == 0.65
+    assert similarity_threshold("google") == 0.70
     assert similarity_threshold("minilm") == 0.3
     assert similarity_threshold("modelo_desconocido") == 0.3
 
@@ -129,7 +147,7 @@ def test_base_caida_falla_antes_de_llamar_a_los_modelos(monkeypatch, make_settin
     settings = make_settings(db_url="postgresql://u:p@127.0.0.1:1/nada")
 
     with pytest.raises(psycopg.OperationalError):
-        pipeline.run_pipeline("x" * 60, "y" * 40, settings)
+        runner.run_agent("x" * 60, "y" * 40, settings)
 
 
 def test_cli_cupo_diario_agotado(monkeypatch, capsys, tmp_path):
@@ -147,7 +165,7 @@ def test_cli_cupo_diario_agotado(monkeypatch, capsys, tmp_path):
     def raise_429(*args, **kwargs):
         raise error
 
-    monkeypatch.setattr(pipeline, "run_pipeline", raise_429)
+    monkeypatch.setattr(runner, "run_agent", raise_429)
     code = cli.main(["run", "--cv", str(tmp_path / "cv.txt"), "--job", str(tmp_path / "job.txt")])
 
     assert code == 3

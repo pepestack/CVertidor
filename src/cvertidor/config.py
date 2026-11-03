@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     openrouter_api_key: SecretStr | None = Field(default=None, validation_alias="OPENROUTER_API_KEY")
 
     output_dir: Path = Field(default=Path("output"), validation_alias="OUTPUT_DIR")
+    # Registro de auditoría local (audit.jsonl), un evento por nodo del grafo
+    log_dir: Path = Field(default=Path("logs"), validation_alias="LOG_DIR")
 
     # Modelos por rol con formato "<proveedor>:<modelo>" (proveedor: google | openrouter).
     # Sin prefijo se asume openrouter. Los fallbacks se separan por comas.

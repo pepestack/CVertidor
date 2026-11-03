@@ -1,4 +1,5 @@
-"""Prompt de generación del CV adaptado a la oferta (el mismo del notebook)."""
+"""Prompt de generación del CV adaptado a la oferta: el del notebook más el plan del
+nodo `plan` (idioma de salida y prioridades) y el recordatorio final de extensión."""
 
 from langchain_core.prompts import ChatPromptTemplate
 
@@ -18,7 +19,8 @@ REGLAS
 - Si un campo del esquema no tiene información suficiente, déjalo vacío.
 - Puedes reordenar, resumir y reformular hechos existentes para destacar su relevancia, pero no agregues alcance, escala, resultados o responsabilidades nuevas.
 - Conserva sin alterar nombres, empresas, cargos, fechas y datos cuantitativos.
-- Mantén el idioma del contexto del candidato.
+- Escribe en el idioma de salida indicado en <plan>; si no se indica, mantén el idioma del contexto del candidato. Al traducir, conserva sin cambios nombres propios, empresas, cargos, instituciones, títulos de certificaciones y cifras; de las fechas solo pueden traducirse los nombres de meses y "Presente".
+- <plan> define prioridades y énfasis, pero nunca autoriza a agregar información que no esté en el contexto del candidato.
 
 PRIORIZACIÓN
 - Prioriza experiencia, habilidades y certificaciones relevantes para la oferta.
@@ -43,6 +45,11 @@ OFERTA DE TRABAJO:
 <job_description>
 {job_description}
 </job_description>
+
+PLAN DE ADAPTACIÓN:
+<plan>
+{plan}
+</plan>
 
 Genera el CV adaptado a esta oferta, usando únicamente la información del contexto del candidato.
 Recuerda: como máximo 4 responsabilidades por cargo (elige las más relevantes para la oferta) y un perfil profesional de 2–3 líneas."""

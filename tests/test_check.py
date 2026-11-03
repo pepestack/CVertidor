@@ -72,7 +72,7 @@ def test_codigo_de_error_de_google_envuelto_por_langchain():
 
 
 def test_cli_cuota_de_gemini_agotada(monkeypatch, capsys, tmp_path):
-    from cvertidor import pipeline
+    from cvertidor.graph import runner
 
     (tmp_path / "cv.txt").write_text("x" * 60, encoding="utf-8")
     (tmp_path / "job.txt").write_text("y" * 40, encoding="utf-8")
@@ -80,7 +80,7 @@ def test_cli_cuota_de_gemini_agotada(monkeypatch, capsys, tmp_path):
     def raise_429(*args, **kwargs):
         raise RuntimeError("Error calling model: 429 RESOURCE_EXHAUSTED") from _GoogleClientError()
 
-    monkeypatch.setattr(pipeline, "run_pipeline", raise_429)
+    monkeypatch.setattr(runner, "run_agent", raise_429)
     code = cli.main(["run", "--cv", str(tmp_path / "cv.txt"), "--job", str(tmp_path / "job.txt")])
 
     assert code == 3

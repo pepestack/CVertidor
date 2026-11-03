@@ -1,13 +1,14 @@
 """Generador de HTML (estilo Harvard) para un StandardCV."""
 
-from cvertidor.render.utils import _join, _url, esc
+from cvertidor.render.utils import _join, _url, esc, labels
 from cvertidor.schemas.cv import StandardCV
 
 
-def cv_to_html(cv: StandardCV) -> str:
+def cv_to_html(cv: StandardCV, lang: str = "es") -> str:
+    t = labels(lang)
     html = [
         "<!DOCTYPE html>",
-        "<html lang='es'>",
+        f"<html lang='{esc(lang)}'>",
         "<head>",
         '<meta charset="utf-8">',
         f"<title>CV - {esc(cv.candidate_name)}</title>",
@@ -92,12 +93,12 @@ def cv_to_html(cv: StandardCV) -> str:
 
     # Perfil Profesional
     if cv.professional_summary:
-        html.append("<h2>Perfil Profesional</h2>")
+        html.append(f"<h2>{t['summary']}</h2>")
         html.append(f"<p>{esc(cv.professional_summary)}</p>")
 
     # Experiencia Laboral
     if cv.work_history:
-        html.append("<h2>Experiencia Laboral</h2>")
+        html.append(f"<h2>{t['work']}</h2>")
         for work in cv.work_history:
             duration_str = esc(work.duration)
             html.append('<div class="entry">')
@@ -115,7 +116,7 @@ def cv_to_html(cv: StandardCV) -> str:
 
     # Educación
     if cv.education:
-        html.append("<h2>Educación</h2>")
+        html.append(f"<h2>{t['education']}</h2>")
         for edu in cv.education:
             html.append('<div class="entry">')
             html.append(
@@ -127,12 +128,12 @@ def cv_to_html(cv: StandardCV) -> str:
 
     # Habilidades Técnicas
     if cv.technical_skills:
-        html.append("<h2>Habilidades Técnicas</h2>")
+        html.append(f"<h2>{t['skills']}</h2>")
         html.append(f'<p class="skills">{esc(", ".join(cv.technical_skills))}</p>')
 
     # Certificaciones
     if cv.certifications:
-        html.append("<h2>Certificaciones</h2>")
+        html.append(f"<h2>{t['certifications']}</h2>")
         for cert in cv.certifications:
             html.append('<div class="entry">')
             html.append(
@@ -143,12 +144,12 @@ def cv_to_html(cv: StandardCV) -> str:
 
     # Idiomas
     if cv.languages:
-        html.append("<h2>Idiomas</h2>")
+        html.append(f"<h2>{t['languages']}</h2>")
         html.append(f'<p class="list-line">{esc(", ".join(cv.languages))}</p>')
 
     # Intereses
     if cv.interests:
-        html.append("<h2>Intereses</h2>")
+        html.append(f"<h2>{t['interests']}</h2>")
         html.append(f'<p class="list-line">{esc(", ".join(cv.interests))}</p>')
 
     html.extend(["</body>", "</html>"])
