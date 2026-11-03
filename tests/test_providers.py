@@ -5,6 +5,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableLambda
 from pydantic import BaseModel
 
+from cvertidor.config import ROLES
 from cvertidor.llm import providers
 from cvertidor.llm.capabilities import pick_structured_method
 from cvertidor.llm.providers import (
@@ -70,6 +71,22 @@ def test_google_traduce_max_tokens(make_settings):
     assert model.max_output_tokens == 8192
 
 
+def test_google_traduce_el_razonamiento_a_thinking_level(make_settings):
+    assert providers.google_thinking_level("parser") == "minimal"
+    assert providers.google_thinking_level("generator") == "minimal"
+    assert providers.google_thinking_level("refiner") == "low"
+
+    model = build_chat_model(ModelSpec("google", "gemini-x"), "generator", make_settings())
+    assert model.thinking_level == "minimal"
+
+
+def test_por_defecto_todos_los_roles_usan_gemini(make_settings):
+    settings = make_settings()
+    for role in ROLES:
+        specs, _ = providers.role_specs(role, settings)
+        assert [str(s) for s in specs] == ["google:gemini-3.1-flash-lite", "google:gemini-3-flash-preview"]
+
+
 def test_falta_la_clave_de_openrouter(make_settings):
     with pytest.raises(ModelConfigError, match="OPENROUTER_API_KEY"):
         build_chat_model(ModelSpec("openrouter", "a/b"), "parser", make_settings(openrouter_api_key=None))
@@ -77,7 +94,7 @@ def test_falta_la_clave_de_openrouter(make_settings):
 
 def test_falta_la_clave_de_google(make_settings):
     with pytest.raises(ModelConfigError, match="GOOGLE_API_KEY"):
-        build_chat_model(ModelSpec("google", "gemini-x"), "parser", make_settings())
+        build_chat_model(ModelSpec("google", "gemini-x"), "parser", make_settings(google_api_key=None))
 
 
 @pytest.mark.parametrize(

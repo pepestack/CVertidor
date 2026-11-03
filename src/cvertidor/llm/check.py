@@ -43,9 +43,24 @@ class CheckResult:
     is_fallback: bool = False
 
 
+def error_status(error: BaseException) -> int | None:
+    """Código HTTP de un error de API: OpenAI/OpenRouter usan status_code y google-genai
+    usa code; LangChain envuelve el error de Google, así que también se revisa la causa"""
+    for candidate in (error, error.__cause__, error.__context__):
+        if candidate is None:
+            continue
+        for attr in ("status_code", "code"):
+            value = getattr(candidate, attr, None)
+            if isinstance(value, int):
+                return value
+    if "RESOURCE_EXHAUSTED" in str(error):
+        return 429
+    return None
+
+
 def describe_error(error: Exception) -> str:
     """Resume un error de API en un mensaje legible"""
-    status = getattr(error, "status_code", None)
+    status = error_status(error)
     known = {
         401: "clave de API inválida (401)",
         402: "sin créditos para este modelo (402)",
@@ -85,12 +100,17 @@ def check_roles(
     capabilities: dict[str, frozenset[str]] | None = None,
 ) -> list[CheckResult]:
     settings = settings or get_settings()
-    caps = capabilities if capabilities is not None else openrouter_capabilities()
+    roles = roles or list(ROLES)
+    if capabilities is None:
+        # El catálogo de OpenRouter solo se consulta si algún rol usa ese proveedor
+        uses_openrouter = any(s.provider == "openrouter" for r in roles for s in role_specs(r, settings)[0])
+        capabilities = openrouter_capabilities() if uses_openrouter else {}
+    caps = capabilities
     results: list[CheckResult] = []
     # Mismo modelo y misma prueba en varios roles: se llama una sola vez
     cache: dict[tuple, tuple[bool, str, float]] = {}
 
-    for role in roles or list(ROLES):
+    for role in roles:
         specs, override = role_specs(role, settings)
         for index, spec in enumerate(specs):
             if role in TOOL_ROLES:

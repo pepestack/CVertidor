@@ -36,6 +36,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     from cvertidor.config import get_settings
     from cvertidor.ingestion.loaders import DocumentLoadError, load_text
+    from cvertidor.llm.check import error_status
     from cvertidor.llm.providers import ModelConfigError
     from cvertidor.pipeline import GenerationError, InputError, run_pipeline
 
@@ -55,12 +56,16 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"Detalle: {str(error).strip()[:200]}")
         return 2
     except Exception as error:
-        if getattr(error, "status_code", None) != 429:
+        if error_status(error) != 429:
             raise
         # Todos los modelos de la cadena respondieron 429
-        if "per-day" in str(error):
+        message = str(error)
+        if "per-day" in message:
             print("Error: se agotó el cupo diario de modelos gratuitos de la cuenta de OpenRouter. "
                   "Se restablece cada día; con créditos en la cuenta el cupo diario es mayor.")
+        elif "RESOURCE_EXHAUSTED" in message:
+            print("Error: se agotó la cuota de la API de Gemini (RESOURCE_EXHAUSTED). "
+                  "Revise los límites de su clave en Google AI Studio o reintente más tarde.")
         else:
             print("Error: los modelos configurados están saturados (429). Reintente en unos minutos.")
         print(f"Detalle: {str(error).strip()[:200]}")

@@ -1,7 +1,29 @@
+import ipaddress
+import socket
+
 import pytest
 
 from cvertidor.config import Settings
 from cvertidor.schemas.cv import Certification, Education, StandardCV, WorkExperience
+
+
+@pytest.fixture(autouse=True)
+def sin_red_externa(monkeypatch):
+    """Ningún test se conecta fuera de la máquina: así nunca gastan tokens ni cupo de API.
+    Las conexiones locales (127.0.0.1, ::1) se permiten para las pruebas de base de datos"""
+    original = socket.socket.connect
+
+    def guarded(sock, address):
+        host = address[0] if isinstance(address, tuple) else address
+        try:
+            local = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            local = host == "localhost"
+        if not local:
+            raise RuntimeError(f"Conexión externa bloqueada en los tests: {address}")
+        return original(sock, address)
+
+    monkeypatch.setattr(socket.socket, "connect", guarded)
 
 
 @pytest.fixture(autouse=True)
@@ -23,9 +45,9 @@ def entorno_limpio(monkeypatch, tmp_path):
 
 @pytest.fixture
 def make_settings(entorno_limpio):
-    """Settings de prueba con una clave falsa de OpenRouter (nunca se llama a la red)"""
+    """Settings de prueba con claves falsas de Google y OpenRouter (nunca se llama a la red)"""
     def factory(**overrides) -> Settings:
-        values = {"openrouter_api_key": "sk-or-prueba"} | overrides
+        values = {"google_api_key": "g-prueba", "openrouter_api_key": "sk-or-prueba"} | overrides
         return Settings(**values)
     return factory
 

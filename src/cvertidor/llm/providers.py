@@ -70,6 +70,16 @@ def openrouter_extra_body(
     return {"reasoning": reasoning}
 
 
+def google_thinking_level(role: str) -> str | None:
+    """Equivalente en Gemini 3 del parámetro de razonamiento del rol (thinking_level)"""
+    reasoning = ROLE_PARAMS[role].get("reasoning")
+    if not reasoning:
+        return None
+    if reasoning.get("enabled") is False:
+        return "minimal"
+    return reasoning.get("effort")
+
+
 def build_chat_model(
     spec: ModelSpec,
     role: str,
@@ -112,6 +122,7 @@ def build_chat_model(
             temperature=params["temperature"],
             top_p=params.get("top_p"),
             max_output_tokens=params["max_tokens"],
+            thinking_level=google_thinking_level(role),
             max_retries=retries,
             timeout=settings.llm_timeout,
         )

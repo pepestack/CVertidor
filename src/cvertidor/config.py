@@ -10,6 +10,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Secretos que se copian desde Colab (userdata) al entorno, si se ejecuta en Colab
 COLAB_SECRETS = ("DB_URL", "OPENROUTER_API_KEY", "GOOGLE_API_KEY")
 
+# Respaldo de los roles de chat: Flash Lite responde 503 (alta demanda) en horas punta
+GEMINI_FALLBACK = "google:gemini-3-flash-preview"
+
 
 def cargar_secretos_colab() -> bool:
     """Copia los secretos de Colab a os.environ; no hace nada fuera de Colab"""
@@ -41,19 +44,22 @@ class Settings(BaseSettings):
     )
 
     db_url: str | None = Field(default=None, validation_alias="DB_URL")
-    openrouter_api_key: SecretStr | None = Field(default=None, validation_alias="OPENROUTER_API_KEY")
-    # API_KEY se mantiene por compatibilidad con el .env original del notebook
+    # Proveedor principal. API_KEY se mantiene por compatibilidad con el .env original del notebook
     google_api_key: SecretStr | None = Field(
         default=None,
         validation_alias=AliasChoices("GOOGLE_API_KEY", "API_KEY"),
     )
+    # Opcional: solo si algún rol usa modelos de OpenRouter (openrouter:<modelo>)
+    openrouter_api_key: SecretStr | None = Field(default=None, validation_alias="OPENROUTER_API_KEY")
 
     output_dir: Path = Field(default=Path("output"), validation_alias="OUTPUT_DIR")
 
-    # Modelos por rol con formato "<proveedor>:<modelo>" (proveedor: openrouter | google).
+    # Modelos por rol con formato "<proveedor>:<modelo>" (proveedor: google | openrouter).
     # Sin prefijo se asume openrouter. Los fallbacks se separan por comas.
-    parser_model: str = "openrouter:nvidia/nemotron-3.5-super-vl:free"
-    parser_model_fallbacks: str = "openrouter:google/gemma-4-31b-it:free,openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"
+    # Por defecto todos los roles usan Gemini, el mismo modelo del notebook; el perfil
+    # gratuito de OpenRouter está documentado en .env.example
+    parser_model: str = "google:gemini-3.1-flash-lite"
+    parser_model_fallbacks: str = GEMINI_FALLBACK
     parser_structured_method: str | None = None
 
     # Vacío = mismos modelos que el parser
@@ -61,21 +67,19 @@ class Settings(BaseSettings):
     job_model_fallbacks: str | None = None
     job_structured_method: str | None = None
 
-    # Gemma escribe bien en español, pero su pool gratuito (Google AI Studio) se satura
-    # seguido (429 upstream), por eso va como respaldo y no como principal
-    generator_model: str = "openrouter:nvidia/nemotron-3.5-super-vl:free"
-    generator_model_fallbacks: str = "openrouter:google/gemma-4-31b-it:free,openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"
+    generator_model: str = "google:gemini-3.1-flash-lite"
+    generator_model_fallbacks: str = GEMINI_FALLBACK
     generator_structured_method: str | None = None
 
-    refiner_model: str = "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"
-    refiner_model_fallbacks: str = "openrouter:google/gemma-4-31b-it:free"
+    refiner_model: str = "google:gemini-3.1-flash-lite"
+    refiner_model_fallbacks: str = GEMINI_FALLBACK
     refiner_structured_method: str | None = None
 
-    escalation_model: str = "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"
-    escalation_model_fallbacks: str = ""
+    escalation_model: str = "google:gemini-3.1-flash-lite"
+    escalation_model_fallbacks: str = GEMINI_FALLBACK
     escalation_structured_method: str | None = None
 
-    embedding_model: str = "openrouter:nvidia/nemotron-3.5-embed-1b:free"
+    embedding_model: str = "google:models/gemini-embedding-2"
 
     # Reintentos con backoff exponencial ante 429/5xx y tiempo máximo por llamada (segundos).
     # Solo el último modelo de cada cadena reintenta; los anteriores ceden de inmediato al respaldo
