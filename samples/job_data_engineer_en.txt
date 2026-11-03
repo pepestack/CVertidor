@@ -1,0 +1,21 @@
+Senior Data Engineer - Fintech Analytics (Remote, LATAM)
+
+We are a fictional fintech company building the analytics platform behind our payments products. We are looking for a Data Engineer to design, build and maintain our data pipelines and warehouse.
+
+Responsibilities:
+- Design and maintain ELT/ETL pipelines on Google Cloud Platform.
+- Model data in BigQuery using dimensional modeling (star and snowflake schemas).
+- Build modular transformations with dbt and orchestrate them with Apache Airflow.
+- Work with business teams to deliver financial KPIs in Power BI or Looker.
+
+Requirements:
+- 3+ years of experience as a Data Engineer or in a similar role.
+- Strong Python and SQL skills.
+- Hands-on experience with BigQuery, dbt and Airflow.
+- Experience with Git and CI practices.
+- Fluent English, written and spoken.
+
+Nice to have:
+- Google Cloud Professional Data Engineer certification.
+- Experience with Docker and Terraform.
+- Experience using AI tools such as GitHub Copilot.

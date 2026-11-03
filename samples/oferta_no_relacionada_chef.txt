@@ -1,0 +1,19 @@
+Chef de Partida - Restaurante de cocina mediterránea (Providencia, Santiago)
+
+Restaurante ficticio busca Chef de Partida para su cocina caliente.
+
+Funciones:
+- Preparar y emplatar los platos de la partida de carnes y pescados según la carta.
+- Controlar mermas, inventario y rotación de insumos.
+- Mantener los estándares de higiene y manipulación de alimentos.
+- Apoyar en la capacitación de ayudantes de cocina.
+
+Requisitos:
+- Título de Gastronomía o Cocina Profesional.
+- 2 años de experiencia en cocina de restaurante.
+- Conocimiento de técnicas de cocción y cortes de carne.
+- Disponibilidad para turnos rotativos y fines de semana.
+
+Deseable:
+- Experiencia en cocina mediterránea.
+- Curso de manipulación de alimentos vigente.

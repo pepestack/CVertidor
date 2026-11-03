@@ -1,0 +1,138 @@
+CURRÍCULUM VITAE
+DATOS PERSONALES
+
+    Nombre completo: Sebastián Alejandro Navarro Paredes
+
+    Título profesional: Ingeniero Civil Industrial
+
+    Ubicación: Las Condes, Santiago, Chile
+
+    Teléfono: +56 9 6123 4567
+
+    Correo electrónico: sebastian.navarro.dev@emailficticio.cl
+
+    LinkedIn: linkedin.com/in/snavarro-data-engineer
+
+    GitHub: github.com/snavarro-data
+
+RESUMEN PROFESIONAL
+
+Ingeniero Civil Industrial especializado en el diseño, implementación y optimización de arquitecturas de datos masivos e infraestructura cloud. Poseo más de 6 años de experiencia liderando la transformación de datos crudos en activos analíticos estratégicos para la toma de decisiones comerciales y financieras en el sector corporativo.
+
+Dominio avanzado de modelos relacionales y no relacionales mediante SQL y Python, así como en la orquestación de datos sobre entornos Google Cloud Platform (GCP). Amplia trayectoria en el desarrollo de modelos de datos analíticos con DBT, automatización de flujos y generación de soluciones BI interactivos con Power BI y Looker. Apasionado por la integración de tecnologías emergentes de Inteligencia Artificial para acelerar el desarrollo y elevar la calidad del gobierno de datos.
+EXPERIENCIA LABORAL
+1. Data Engineer & Controller de Procesos de Datos
+
+Grupo Financiero e Inversiones del Pacífico S.A. | Las Condes, Santiago
+
+Marzo 2022 – Presente
+
+    Responsabilidades Clave y Gestión de Procesos:
+
+        Liderar el diseño, construcción y mantenimiento continuo de pipelines de datos ELT/ETL escalables utilizando Python y SQL en entornos de producción de alta disponibilidad.
+
+        Diseñar y estructurar modelos de datos dimensionales (Estrella y Copo de Nieve) en Google BigQuery para dar soporte a las decisiones comerciales y financieras del grupo corporativo.
+
+        Implementar modelos de transformación modular utilizando DBT (Data Build Tool), asegurando el control de versiones, documentación de linaje de datos y pruebas de calidad automatizadas.
+
+        Migrar sistemas legados de bases de datos desde SQL Server on-premise hacia arquitecturas modernas serverless en Google Cloud Platform (GCP).
+
+        Monitorear diariamente el correcto flujo y la calidad de las cargas masivas mediante DAGs de Apache Airflow, detectando anomalias en tiempo real y garantizando la integridad operacional.
+
+        Desarrollar e integrar agentes de asistencia basados en Inteligencia Artificial (GitHub Copilot y Gemini API) para optimizar la refactorización de código SQL y acelerar la creación de scripts de limpieza.
+
+        Construir y mantener tableros de control ejecutivos e interactivos en Power BI y Looker para el seguimiento de KPIs de ventas, margen financiero, fuga de clientes y eficiencia operacional.
+
+        Diseñar alertas automatizadas en Python que notifican de forma inmediata a los equipos de Control de Gestión ante desvíos significativos en los indicadores comerciales clave.
+
+        Automatizar la extracción de datos desde diversas fuentes heterogéneas, incluyendo APIs REST, archivos planos (CSV, Parquet) y bases de datos relacionales relacionales (PostgreSQL, MySQL).
+
+        Liderar mesas de trabajo conjuntas entre los equipos de Tecnología (IT) y las unidades de Negocio/Finanzas para levantar requerimientos analíticos e identificaciones de fuentes de información.
+
+        Documentar exhaustivamente el diccionario de datos corporativo y definir políticas de gobierno y permisos de acceso según roles de usuario (RBAC).
+
+        Optimizar los costos de cómputo y almacenamiento en BigQuery mediante la implementación de estrategias de particionamiento y clusterización de tablas de gran volumen.
+
+        Realizar auditorías periódicas de rendimiento sobre consultas SQL críticas, reduciendo los tiempos de ejecución en un promedio del 40%.
+
+2. Analista Senior de Datos & Business Intelligence
+
+Servicios Logísticos y Retail Cono Sur | Providencia, Santiago
+
+Mayo 2019 – Febrero 2022
+
+    Consolidación de información de ventas e inventario multisucursal integrando datos de SQL Server y PostgreSQL hacia un data warehouse centralizado.
+
+    Desarrollo y despliegue de más de 30 reportes operativos y estratégicos en Power BI para las áreas de Operaciones, Logística y Finanzas.
+
+    Creación de scripts automatizados en Python (Pandas, OpenPyXL) para la generación y envío programado de reportes diarios a la alta gerencia.
+
+    Análisis de datos históricos de demanda para apoyar la planificación de inventarios mediante modelos estadísticos descriptivos.
+
+3. Analista Junior de Procesos & Métricas
+
+Consultores de Gestión y Operaciones Ltda. | Santiago Centro, Chile
+
+Enero 2018 – Abril 2019
+
+    Levantamiento, mapeo y documentación de procesos de negocio utilizando la notación BPMN en Bizagi.
+
+    Diseño de tableros de control iniciales en Excel avanzado (VBA, Power Query) para el seguimiento de tiempos de ciclo de producción.
+
+    Apoyo en la recopilación de requerimientos con partes interesadas para la mejora de procesos internos.
+
+4. Práctica Profesional – Área de Control de Gestión
+
+Banco de Inversiones Global | Santiago, Chile
+
+Diciembre 2016 – Febrero 2017
+
+    Automatización de la conciliación de datos financieros diarios utilizando macros de Excel.
+
+    Elaboración de presentaciones ejecutivas mensuales en PowerPoint para la revisión de presupuestos departamentales.
+
+EDUCACIÓN ACADÉMICA
+
+    Ingeniería Civil Industrial
+
+    Universidad de Chile | Santiago, Chile
+
+    2012 – 2017
+
+        Especialización: Sistemas de Información y Control de Gestión.
+
+CERTIFICACIONES Y CURSOS
+
+    Google Cloud Professional Data Engineer – Google Cloud Certification (2024)
+
+    dbt Fundamentals Certification – dbt Labs (2023)
+
+    Python for Data Science and Machine Learning Bootcamp – Udemy (2022)
+
+    Microsoft Certified: Power BI Data Analyst Associate (PL-300) – Microsoft (2021)
+
+    Certificado en SQL para Análisis Avanzado de Datos – Platzi (2020)
+
+HABILIDADES TÉCNICAS
+
+    Lenguajes de Programación & BD: Python, SQL (BigQuery, PostgreSQL, SQL Server, MySQL), Bash.
+
+    Ingeniería de Datos & Cloud: Google Cloud Platform (BigQuery, Cloud Storage, Cloud Functions), DBT, Apache Airflow, Docker (Básico), Git/GitHub.
+
+    Visualización & Analytics: Power BI, Looker, Tableau, Excel Avanzado.
+
+    Herramientas de IA & Productividad: Gemini API, GitHub Copilot, ChatGPT Enterprise, VS Code.
+
+IDIOMAS
+
+    Español: Nativo.
+
+    Inglés: Avanzado (C1) – Capacidad de mantener reuniones técnicas, redactar documentación y presentar resultados en entornos globales.
+
+INTERESES PERSONALES Y OTRAS ACTIVIDADES
+
+    Ajedrez Competitivo: Participante en torneos locales de ajedrez rápido y resolución de problemas tácticos.
+
+    Senderismo y Montañismo: Salidas periódicas a rutas de trekking en la Cordillera de los Andes durante los fines de semana.
+
+    Podcasting Técnico: Oyente activo y colaborador ocasional en comunidades online sobre datos, analítica e Inteligencia Artificial en Latinoamérica.
