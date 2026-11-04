@@ -3,9 +3,11 @@
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Annotated, Any, TypedDict
+from typing import Annotated, Any, Literal, TypedDict
 
 from langchain_core.documents import Document
+from langchain_core.messages import AnyMessage
+from langgraph.graph.message import add_messages
 
 from cvertidor.config import Settings
 from cvertidor.graph.planning import Plan
@@ -26,7 +28,8 @@ def accumulate(current: list | None, update: list | None) -> list:
 
 
 class AgentState(TypedDict, total=False):
-    # Entrada
+    # Entrada: "run" genera un CV; "chat" conversa sobre el que ya existe en el hilo
+    mode: Literal["run", "chat"]
     cv_text: str
     job_text: str
     run_id: str
@@ -66,6 +69,13 @@ class AgentState(TypedDict, total=False):
     markdown: str
     html: str
     output_paths: list[str]
+    # Conversación (memoria de corto plazo). Los mensajes llegan enmascarados a los modelos
+    messages: Annotated[list[AnyMessage], add_messages]
+    conversation_summary: str | None
+    refine_steps: int
+    # Preferencias que el modelo propuso y que la persona debe confirmar
+    preference_queue: Annotated[list[dict], accumulate]
+    preferences_handled: int
     # Se acumulan entre nodos (ingest_cv y analyze_job corren en paralelo)
     warnings: Annotated[list[str], accumulate]
     metrics: Annotated[list[StepMetrics], accumulate]

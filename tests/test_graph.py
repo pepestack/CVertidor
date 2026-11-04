@@ -4,13 +4,14 @@ from contextlib import nullcontext
 import pytest
 from langchain_core.documents import Document
 from langchain_core.embeddings import DeterministicFakeEmbedding
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.runnables import RunnableLambda
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 
 from cvertidor import cli, pipeline
-from cvertidor.graph import builder, edges, nodes, runner
+from cvertidor.graph import builder, edges, nodes, refine, runner
 from cvertidor.llm.decisions import DecisionError, DecisionResult
 from cvertidor.llm.embeddings import EmbeddingsInfo
 from cvertidor.pipeline import GenerationError, InputError
@@ -110,7 +111,7 @@ def fake_world(monkeypatch, make_settings, sample_cv, tmp_path):
         return runner.resume_agent(thread_id, action, feedback, settings, embeddings_info=info)
 
     return {"run": run, "resume": resume, "calls": calls, "retrieval_results": retrieval_results,
-            "job_result": job_result, "settings": settings, "store": store,
+            "job_result": job_result, "settings": settings, "store": store, "info": info,
             "decision": decision, "judge_review": judge_review}
 
 
@@ -400,6 +401,102 @@ def test_escalacion_permite_corregir_una_sola_vez(fake_world):
     assert result.output_paths and any("decisión humana" in w for w in result.warnings)
 
 
+def _scripted(monkeypatch, replies, seen):
+    """Modelo del agente con respuestas fijas; registra lo que recibe en cada llamada"""
+    queue = list(replies)
+
+    def model(*args, **kwargs):
+        def run(messages):
+            seen.append(messages)
+            return queue.pop(0)
+        return RunnableLambda(run)
+
+    monkeypatch.setattr(refine, "get_tool_model", model)
+    monkeypatch.setattr(refine, "get_chat_model", lambda *a, **k: RunnableLambda(lambda _: AIMessage("RESUMEN COMPRIMIDO")))
+
+
+def _call(name, **args):
+    return AIMessage("", tool_calls=[{"name": name, "args": args, "id": f"id-{name}", "type": "tool_call"}])
+
+
+def test_agente_edita_guarda_y_recuerda_con_confirmacion(fake_world, monkeypatch):
+    with pytest.raises(InputError, match="no tiene un CV"):
+        runner.chat_agent("sin-cv", "hola", fake_world["settings"], embeddings_info=fake_world["info"])
+
+    first = fake_world["run"](thread_id="chat")
+    seen = []
+    _scripted(monkeypatch, [
+        _call("edit_cv", output_language="en"),
+        _call("remember_preference", preference="siempre en inglés", output_language="en"),
+        AIMessage("Listo, [CANDIDATO_1]."),
+        _call("save_cv_files"),
+        _call("save_cv_files"),
+        AIMessage("Guardado."),
+        _call("forget_preference", preference="ingles siempre"),
+        AIMessage("Se conserva."),
+        _call("forget_preference", preference="siempre en inglés"),
+        AIMessage("Olvidada."),
+    ], seen)
+    # El candidato nunca es un argumento que el modelo pueda elegir
+    arguments = {name for t in refine.REFINER_TOOLS for name in t.tool_call_schema.model_json_schema().get("properties", {})}
+    assert arguments == {"query", "preference", "output_language"}
+
+    def chat(message):
+        return runner.chat_agent("chat", message, fake_world["settings"], embeddings_info=fake_world["info"])
+
+    pending = chat(f"Tradúcelo al inglés y recuérdalo. Soy {first.parsed_cv.candidate_name}, ana@empresa.cl")
+    assert pending.kind == "preference" and "siempre en inglés" in pending.question
+
+    # El dato confirmado es el texto de la persona, enmascarado; el draft se editó y está en inglés
+    assert first.parsed_cv.candidate_name not in fake_world["calls"]["context"]
+    assert "Tradúcelo al inglés" in fake_world["calls"]["context"]
+    assert fake_world["store"].search(("preferences", first.candidate_id)) == []  # aún no confirmada
+
+    reply = fake_world["resume"]("chat", "guardar")
+    assert isinstance(reply, runner.ChatReply)
+    assert reply.text == f"Listo, {first.parsed_cv.candidate_name}."  # la persona lee su dato real
+    assert all(first.parsed_cv.candidate_name not in str(m.content) for call in seen for m in call)
+
+    # Guardar dos veces lo mismo deja un solo par de archivos y un solo registro
+    before = len(list(fake_world["settings"].output_dir.glob("*")))
+    records = len(fake_world["store"].search(("generations", first.candidate_id), limit=50))
+    saved = chat("Guárdalo")
+    assert [p.suffix for p in saved.output_paths] == [".md", ".html"]
+    assert len(list(fake_world["settings"].output_dir.glob("*"))) == before + 2
+    assert len(fake_world["store"].search(("generations", first.candidate_id), limit=50)) == records + 1
+
+    # Otro hilo del mismo candidato recuerda la preferencia, incluso con una oferta en español
+    pending = fake_world["run"](thread_id="otro-hilo", auto_approve=False)
+    assert "## Work Experience" in pending.preview
+    fake_world["resume"]("otro-hilo", "descartar")
+
+    # Olvidar también se confirma: se muestra la preferencia real, aunque se haya pedido con otras palabras
+    pending = chat("Olvida lo del inglés")
+    assert (pending.options, pending.question) == (["olvidar", "conservar"], "¿Olvido esta preferencia?: siempre en inglés")
+    assert fake_world["resume"]("chat", "conservar").text == "Se conserva."
+    assert len(fake_world["store"].search(("preferences", first.candidate_id))) == 1
+
+    chat("Olvida lo del inglés")
+    assert fake_world["resume"]("chat", "olvidar").text == "Olvidada."
+    assert fake_world["store"].search(("preferences", first.candidate_id)) == []
+    assert "## Experiencia Laboral" in fake_world["run"](thread_id="tercer-hilo", auto_approve=False).preview
+
+
+def test_hilo_largo_respeta_el_presupuesto_y_conserva_resumen_y_borrador(fake_world, monkeypatch):
+    fake_world["run"](thread_id="largo")
+    seen = []
+    _scripted(monkeypatch, [AIMessage("respuesta " * 100) for _ in range(12)], seen)
+
+    for turn in range(12):
+        runner.chat_agent("largo", f"Pregunta {turn}: " + "detalle " * 100, fake_world["settings"],
+                          embeddings_info=fake_world["info"])
+
+    system, *history = seen[-1]
+    assert count_tokens_approximately(history) <= refine.HISTORY_TOKENS
+    assert "RESUMEN COMPRIMIDO" in system.content and "## Experiencia Laboral" in system.content
+    assert isinstance(history[0], HumanMessage) and "Pregunta 11" in history[-1].content
+
+
 def test_error_en_un_nodo_queda_auditado(fake_world, monkeypatch):
     def broken(*args, **kwargs):
         raise GenerationError("salida inválida")
@@ -423,7 +520,7 @@ def test_ruta_despues_de_recuperar(docs, attempts, expected):
 
 def test_diagrama_mermaid():
     mermaid = builder.graph_mermaid()
-    for node in ("load_memory", "ingest_cv", "index_cv", "analyze_job", "plan", "retrieve", "generate", "validate", "judge", "human_review", "human_escalation", "render_and_save"):
+    for node in ("load_memory", "ingest_cv", "index_cv", "analyze_job", "plan", "retrieve", "generate", "validate", "judge", "human_review", "human_escalation", "render_and_save", "refine_agent", "tools", "confirm_preference"):
         assert node in mermaid
     # Arista condicional: reintento de la recuperación o paso a la generación
     assert "retrieve -.-> retrieve" in mermaid

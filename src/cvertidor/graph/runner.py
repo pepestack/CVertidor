@@ -8,22 +8,27 @@ from pathlib import Path
 from typing import Any
 
 from langchain_core.documents import Document
+from langchain_core.messages import HumanMessage
 from langgraph.types import Command
 
 from cvertidor.config import Settings, get_settings
 from cvertidor.graph.builder import build_graph
 from cvertidor.graph.planning import Plan
 from cvertidor.graph.state import AgentContext
+from cvertidor.ingestion.pii import scrub_pii, unmask
 from cvertidor.llm.embeddings import EmbeddingsInfo, get_embeddings
+from cvertidor.llm.providers import message_text
 from cvertidor.memory.checkpointer import open_checkpointer
 from cvertidor.memory.store import open_store
 from cvertidor.observability import AuditLog
 from cvertidor.pipeline import (
+    CANDIDATE_TOKEN,
     InputError,
     MIN_CV_LENGTH,
     MIN_JOB_DESC_LENGTH,
     StepMetrics,
     ensure_db_available,
+    mask_cv,
     validate_text,
 )
 from cvertidor.rag.vector_store import SyncStats
@@ -81,6 +86,17 @@ class PendingDecision:
     corrections: list[str] = field(default_factory=list)
 
 
+@dataclass
+class ChatReply:
+    """Respuesta del agente a un mensaje; los archivos son solo los guardados en este turno"""
+    thread_id: str
+    run_id: str
+    text: str
+    output_paths: list[Path] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    metrics: list[StepMetrics] = field(default_factory=list)
+
+
 @contextmanager
 def _open_graph(db_url: str, info: EmbeddingsInfo) -> Iterator[Any]:
     with open_checkpointer(db_url) as checkpointer, open_store(db_url, info) as store:
@@ -91,10 +107,20 @@ def _thread_config(thread_id: str) -> dict:
     return {"configurable": {"thread_id": thread_id}}
 
 
-def _outcome(state: dict, ctx: AgentContext) -> "AgentResult | PendingDecision":
+def _outcome(state: dict, ctx: AgentContext) -> "AgentResult | PendingDecision | ChatReply":
     interrupts = state.get("__interrupt__")
     if interrupts:
         return PendingDecision(thread_id=ctx.thread_id, run_id=ctx.audit.run_id, **interrupts[0].value)
+    if state.get("mode") == "chat":
+        # El modelo solo ve marcadores: la persona lee sus datos reales
+        return ChatReply(
+            thread_id=ctx.thread_id,
+            run_id=ctx.audit.run_id,
+            text=unmask(message_text(state["messages"][-1]), mask_cv(state["parsed_cv"])[1]),
+            output_paths=[Path(p) for p in state.get("output_paths", [])],
+            warnings=state.get("warnings", []),
+            metrics=state.get("metrics", []),
+        )
     decision = state.get("human_decision")
     return AgentResult(
         run_id=ctx.audit.run_id,
@@ -156,9 +182,47 @@ def run_agent(
             raise InputError(f"El hilo '{thread_id}' tiene una decisión pendiente. Retómelo con: cvertidor resume --thread {thread_id}")
         # None reinicia los acumuladores: el hilo conserva el estado de sus ejecuciones anteriores
         state = graph.invoke(
-            {"cv_text": cv_text, "job_text": job_text, "run_id": run_id, "auto_approve": auto_approve,
+            {"mode": "run", "cv_text": cv_text, "job_text": job_text, "run_id": run_id, "auto_approve": auto_approve,
              "warnings": None, "metrics": None},
             config=_thread_config(thread_id),
+            context=ctx,
+        )
+    return _outcome(state, ctx)
+
+
+def chat_agent(
+    thread_id: str,
+    message: str,
+    settings: Settings | None = None,
+    embeddings_info: EmbeddingsInfo | None = None,
+    on_step: Callable[[str], None] = lambda message: None,
+) -> "ChatReply | PendingDecision":
+    """Un mensaje de la persona sobre el CV que ya existe en el hilo"""
+    settings = settings or get_settings()
+    message = validate_text(message, 1, "El mensaje")
+    db_url = settings.require_db_url()
+    ensure_db_available(db_url)
+    info = embeddings_info or get_embeddings(settings)
+
+    with _open_graph(db_url, info) as graph:
+        config = _thread_config(thread_id)
+        snapshot = graph.get_state(config)
+        if snapshot.interrupts:
+            raise InputError(f"El hilo '{thread_id}' tiene una decisión pendiente. Retómelo con: cvertidor resume --thread {thread_id}")
+        if not snapshot.values.get("draft_cv"):
+            raise InputError(f"El hilo '{thread_id}' no tiene un CV. Genérelo con: cvertidor run --thread {thread_id} --cv ... --job ...")
+
+        run_id = uuid.uuid4().hex[:12]
+        ctx = AgentContext(settings=settings, audit=AuditLog(settings.log_dir, run_id, thread_id), on_step=on_step,
+                           embeddings_info=info, thread_id=thread_id)
+        # El mensaje va a los modelos: se oculta lo personal antes de que entre al historial
+        name = snapshot.values["parsed_cv"].candidate_name
+        cleaned = scrub_pii(message).replace(name, CANDIDATE_TOKEN)
+        state = graph.invoke(
+            {"mode": "chat", "run_id": run_id, "messages": [HumanMessage(cleaned)], "refine_steps": 0,
+             "preference_queue": None, "preferences_handled": 0, "output_paths": [],
+             "warnings": None, "metrics": None},
+            config=config,
             context=ctx,
         )
     return _outcome(state, ctx)

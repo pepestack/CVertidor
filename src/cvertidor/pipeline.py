@@ -4,6 +4,7 @@ Los nodos del grafo de LangGraph (cvertidor.graph) las orquestan y deciden el or
 los reintentos y los caminos alternativos.
 """
 
+import hashlib
 import re
 import time
 from collections.abc import Callable
@@ -188,9 +189,12 @@ def ensure_db_available(db_url: str) -> None:
         conn.execute("SELECT 1")
 
 
-def save_outputs(candidate_id: str, markdown: str, html: str, output_dir: Path) -> list[Path]:
+def save_outputs(candidate_id: str, markdown: str, html: str, output_dir: Path, job_text: str = "") -> list[Path]:
+    """Los nombres dependen del contenido: guardar lo mismo dos veces no duplica archivos, y un
+    CV para otra oferta no sobrescribe el anterior. candidate_id solo contiene [a-z0-9_]"""
     output_dir.mkdir(parents=True, exist_ok=True)
-    paths = [output_dir / f"cv_{candidate_id}.md", output_dir / f"cv_{candidate_id}.html"]
+    version = hashlib.sha256(f"{job_text}\n{markdown}".encode("utf-8")).hexdigest()[:8]
+    paths = [output_dir / f"cv_{candidate_id}_{version}.md", output_dir / f"cv_{candidate_id}_{version}.html"]
     paths[0].write_text(markdown, encoding="utf-8")
     paths[1].write_text(html, encoding="utf-8")
     return paths

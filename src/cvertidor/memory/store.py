@@ -80,6 +80,42 @@ def load_preferences(store: BaseStore, candidate_id: str) -> list[str]:
     return [item.value[SEMANTIC_FIELD] for item in store.search(("preferences", candidate_id), limit=20)]
 
 
+def load_preferred_language(store: BaseStore, candidate_id: str) -> str | None:
+    """Idioma de salida que la persona pidió recordar; manda sobre el idioma de la oferta"""
+    for item in store.search(("preferences", candidate_id), limit=20):
+        if item.value.get("output_language"):
+            return item.value["output_language"]
+    return None
+
+
+def search_preferences(store: BaseStore, candidate_id: str, query: str = "") -> list[str]:
+    """Preferencias del candidato; con `query`, las semánticamente más cercanas primero"""
+    items = store.search(("preferences", candidate_id), query=query or None, limit=10)
+    return [item.value[SEMANTIC_FIELD] for item in items]
+
+
+def save_preference(store: BaseStore, candidate_id: str, text: str, output_language: str | None = None) -> None:
+    """Idempotente: la misma preferencia actualiza el mismo registro"""
+    store.put(("preferences", candidate_id), text_hash(text)[:16],
+              {SEMANTIC_FIELD: text, "output_language": output_language, "updated_at": _now()})
+
+
+def find_preference(store: BaseStore, candidate_id: str, text: str) -> tuple[str, str] | None:
+    """(clave, texto) de la preferencia guardada: la exacta o, si no hay, la más parecida.
+    La persona ve el texto encontrado antes de borrarla, así que un parecido equivocado se detecta"""
+    namespace = ("preferences", candidate_id)
+    wanted = text.strip().lower()
+    for item in store.search(namespace, limit=20):
+        if item.value[SEMANTIC_FIELD].strip().lower() == wanted:
+            return item.key, item.value[SEMANTIC_FIELD]
+    closest = store.search(namespace, query=text, limit=1)
+    return (closest[0].key, closest[0].value[SEMANTIC_FIELD]) if closest else None
+
+
+def forget_preference(store: BaseStore, candidate_id: str, key: str) -> None:
+    store.delete(("preferences", candidate_id), key)
+
+
 def find_similar_generations(store: BaseStore, candidate_id: str, job_text: str, limit: int = 3) -> list[dict]:
     """CV generados antes para este candidato, de la oferta más parecida a la menos parecida"""
     items = store.search(("generations", candidate_id), query=job_text[:MAX_INDEXED_CHARS], limit=limit)

@@ -9,7 +9,7 @@ from langgraph.config import get_store
 from langgraph.types import interrupt
 
 from cvertidor.graph.edges import MAX_RETRIEVAL_ATTEMPTS, has_work_history
-from cvertidor.graph.planning import build_plan
+from cvertidor.graph.planning import LANGUAGE_NAMES, build_plan
 from cvertidor.graph.state import AgentContext, AgentState
 from cvertidor.ingestion.pii import scrub_pii
 from cvertidor.llm.check import describe_error
@@ -174,7 +174,8 @@ def plan(state: AgentState, ctx: AgentContext) -> dict:
         similar = []
         warnings.append(f"No se pudieron consultar las generaciones anteriores ({type(error).__name__}).")
 
-    result = build_plan(state["parsed_cv"], state["job_reqs"], state["job_text"], state["cv_text"], preferences)
+    result = build_plan(state["parsed_cv"], state["job_reqs"], state["job_text"], state["cv_text"], preferences,
+                        memory.load_preferred_language(store, candidate_id))
     return {
         "plan": result,
         "preferences": preferences,
@@ -272,7 +273,7 @@ def generate(state: AgentState, ctx: AgentContext) -> dict:
 
     attempts = state.get("generation_attempts", 0) + 1
     # Con correcciones de una persona se edita el borrador que revisó, en vez de reescribirlo
-    current_draft = _review_markdown(state["draft_cv"], state["plan"].output_language) if corrections else None
+    current_draft = review_markdown(state["draft_cv"], state["plan"].output_language) if corrections else None
     draft, raw = generate_adapted_cv(context, state["job_text"], state["parsed_cv"], ctx.settings,
                                      plan=plan_text, current_draft=current_draft)
     metrics = step_metrics("generate" if attempts == 1 else f"generate{attempts}", start, raw)
@@ -301,7 +302,7 @@ def generate(state: AgentState, ctx: AgentContext) -> dict:
     }
 
 
-def _review_markdown(draft: StandardCV, lang: str) -> str:
+def review_markdown(draft: StandardCV, lang: str) -> str:
     """El CV tal como lo ven los evaluadores: enmascarado y sin datos de contacto (no se evalúan)"""
     masked = mask_cv(draft)[0].model_copy(update={
         "email": None, "phone": None, "location": None, "linkedin_url": None, "portfolio_url": None,
@@ -324,7 +325,7 @@ def validate(state: AgentState, ctx: AgentContext) -> dict:
     else:
         try:
             result = evaluate_draft(state["context"], state["job_reqs"].must_have,
-                                    _review_markdown(state["draft_cv"], plan_result.output_language), ctx.settings)
+                                    review_markdown(state["draft_cv"], plan_result.output_language), ctx.settings)
             decision_model = result.model
             status = status_from_scores(result.scores, human_corrected=bool(corrections))
             flagged = [b["feedback"] for name, b in BEHAVIORS.items()
@@ -359,7 +360,7 @@ def judge(state: AgentState, ctx: AgentContext) -> dict:
         review, raw = invoke_structured(chain, {
             "context": state["context"],
             "requirements": ", ".join(state["job_reqs"].must_have) or "sin requisitos",
-            "adapted_cv": _review_markdown(state["draft_cv"], state["plan"].output_language),
+            "adapted_cv": review_markdown(state["draft_cv"], state["plan"].output_language),
         }, "JudgeReview")
         status = "approved" if review.approved else "rejected"
         feedback = None
@@ -457,7 +458,7 @@ def render_and_save(state: AgentState, ctx: AgentContext) -> dict:
     lang = plan_result.output_language
     markdown = cv_to_markdown(state["draft_cv"], lang=lang)
     html = cv_to_html(state["draft_cv"], lang=lang)
-    paths = save_outputs(state["candidate_id"], markdown, html, ctx.settings.output_dir)
+    paths = save_outputs(state["candidate_id"], markdown, html, ctx.settings.output_dir, state["job_text"])
 
     warnings = []
     corrections = state.get("human_corrections", [])

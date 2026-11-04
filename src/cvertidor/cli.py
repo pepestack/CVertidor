@@ -36,10 +36,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     resume = subparsers.add_parser("resume", help="Retoma un hilo pausado esperando una decisión")
     resume.add_argument("--thread", required=True, help="Hilo a retomar")
-    resume.add_argument("--decision", choices=["aprobar", "aceptar", "corregir", "descartar"],
+    resume.add_argument("--decision", choices=["aprobar", "aceptar", "corregir", "descartar", "guardar", "omitir", "olvidar", "conservar"],
                         help="Decisión (por defecto se muestra lo pendiente y se pregunta)")
     resume.add_argument("--comentario", help="Qué cambiar, si la decisión es corregir")
     resume.add_argument("--salida", help="Carpeta de salida (por defecto OUTPUT_DIR o ./output)")
+
+    chat = subparsers.add_parser("chat", help="Conversa con el agente para afinar el CV de un hilo")
+    chat.add_argument("--thread", required=True, help="Hilo con un CV ya generado")
+    chat.add_argument("--mensaje", help="Envía este mensaje y termina (por defecto, conversación interactiva)")
+    chat.add_argument("--salida", help="Carpeta de salida (por defecto OUTPUT_DIR o ./output)")
 
     graph = subparsers.add_parser("graph", help="Exporta el diagrama del grafo de LangGraph en Mermaid")
     graph.add_argument("--salida", help="Archivo .mmd o .md donde guardarlo (por defecto se imprime)")
@@ -104,6 +109,9 @@ VERDICT_SOURCES = {"checks": "chequeos", "decision_model": "modelo de decisión"
 
 
 def _print_pending(pending) -> None:
+    if pending.kind == "preference":
+        print(f"\n{pending.question}")
+        return
     scores = ", ".join(f"{name} {value:.2f}" for name, value in pending.scores.items())
     print(f"\n{'=' * 70}\n{pending.preview}\n{'=' * 70}")
     print(f"Validación: {VERDICT_LABELS[pending.status]} por {VERDICT_SOURCES[pending.source]} "
@@ -140,7 +148,7 @@ def _ask_decision(pending) -> tuple[str, str | None] | None:
 
 def _drive(outcome, settings, decision: tuple[str, str | None] | None = None) -> int:
     """Pregunta a la persona mientras el grafo esté pausado y muestra el resultado final"""
-    from cvertidor.graph.runner import PendingDecision, resume_agent
+    from cvertidor.graph.runner import ChatReply, PendingDecision, resume_agent
 
     while isinstance(outcome, PendingDecision):
         _print_pending(outcome)
@@ -155,8 +163,50 @@ def _drive(outcome, settings, decision: tuple[str, str | None] | None = None) ->
                                                 on_step=lambda m: print(f"-> {m}")))
     if isinstance(outcome, int):
         return outcome
-    _print_result(outcome, settings)
+    if isinstance(outcome, ChatReply):
+        _print_reply(outcome)
+    else:
+        _print_result(outcome, settings)
     return 0
+
+
+def _print_reply(reply) -> None:
+    print(f"\nAgente: {reply.text}")
+    for warning in reply.warnings:
+        print(f"Aviso: {warning}")
+    for path in reply.output_paths:
+        print(f"  Guardado: {path}")
+    used = [m for m in reply.metrics if m.input_tokens is not None]
+    if used:
+        print(f"  ({len(used)} llamadas, {sum(m.input_tokens + (m.output_tokens or 0) for m in used)} tokens)")
+
+
+def cmd_chat(args: argparse.Namespace) -> int:
+    from cvertidor.config import get_settings
+    from cvertidor.graph.runner import chat_agent
+
+    settings = get_settings()
+    if args.salida:
+        settings = settings.model_copy(update={"output_dir": Path(args.salida)})
+
+    def send(message: str) -> int:
+        return _drive(_guarded(lambda: chat_agent(args.thread, message, settings,
+                                                  on_step=lambda m: print(f"-> {m}"))), settings)
+
+    if args.mensaje:
+        return send(args.mensaje)
+    print("Escriba 'salir' para terminar. Los cambios no se guardan hasta que lo pida.")
+    while True:
+        try:
+            message = input("\nUsted: ").strip()
+        except EOFError:
+            return 0
+        if message.lower() in ("salir", "exit"):
+            return 0
+        if message:
+            code = send(message)
+            if code:
+                return code
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -272,6 +322,7 @@ def cmd_check_models(args: argparse.Namespace) -> int:
 
 
 COMMANDS = {
+    "chat": cmd_chat,
     "check-models": cmd_check_models,
     "graph": cmd_graph,
     "resume": cmd_resume,

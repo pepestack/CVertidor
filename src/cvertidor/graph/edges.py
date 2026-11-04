@@ -19,6 +19,21 @@ def has_work_history(docs: list[Document]) -> bool:
     return sum(d.metadata.get("section") == "work_history" for d in docs) >= MIN_WORK_HISTORY_CHUNKS
 
 
+def route_entry(state: AgentState) -> Literal["refine_agent", "load_memory"]:
+    return "refine_agent" if state.get("mode") == "chat" else "load_memory"
+
+
+def route_after_refine(state: AgentState) -> Literal["tools", "__end__"]:
+    return "tools" if state["messages"][-1].tool_calls else "__end__"
+
+
+def route_after_tools(state: AgentState) -> Literal["confirm_preference", "refine_agent"]:
+    """Toda preferencia propuesta pasa por la persona antes de que el agente continúe"""
+    if len(state.get("preference_queue") or []) > state.get("preferences_handled", 0):
+        return "confirm_preference"
+    return "refine_agent"
+
+
 def route_after_memory(state: AgentState) -> list[str]:
     """Solo se llama a los modelos para lo que la memoria no tiene: un CV sin cambios pasa
     directo a indexar y una oferta ya analizada no se vuelve a analizar"""
