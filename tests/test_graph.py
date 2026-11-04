@@ -1,10 +1,13 @@
 import json
+from contextlib import nullcontext
 
 import pytest
 from langchain_core.documents import Document
 from langchain_core.embeddings import DeterministicFakeEmbedding
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableLambda
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.store.memory import InMemoryStore
 
 from cvertidor import cli
 from cvertidor.graph import builder, edges, nodes, runner
@@ -31,17 +34,27 @@ def ai(model="fake-model"):
 @pytest.fixture
 def fake_world(monkeypatch, make_settings, sample_cv, tmp_path):
     """Grafo completo sin red ni base de datos: modelos, pgvector y recuperador falsos"""
-    calls = {"retriever": [], "generate_plan": None}
+    calls = {"retriever": [], "generate_plan": None, "parse": 0, "job": 0}
     retrieval_results = [[*WORK, SKILLS]]
 
     monkeypatch.setattr(runner, "ensure_db_available", lambda url: None)
-    monkeypatch.setattr(nodes, "parse_cv", lambda text, settings: (sample_cv.model_copy(deep=True), [], ai()))
+    # Memoria en RAM en vez de Postgres; misma interfaz y mismo serializador del estado
+    saver, store = InMemorySaver(), InMemoryStore()
+    monkeypatch.setattr(runner, "open_checkpointer", lambda url: nullcontext(saver))
+    monkeypatch.setattr(runner, "open_store", lambda url, info: nullcontext(store))
+
+    def fake_parse(text, settings):
+        calls["parse"] += 1
+        return sample_cv.model_copy(deep=True), [], ai()
+
+    monkeypatch.setattr(nodes, "parse_cv", fake_parse)
     monkeypatch.setattr(nodes, "sync_candidate_docs", lambda *args: SyncStats(27, 0, 0))
 
     job_result = {"value": JobRequirements(title="Data Engineer", must_have=["Python", "SQL"])}
 
     def fake_structured(role, schema, **kwargs):
         def run(_):
+            calls["job"] += 1
             value = job_result["value"]
             if isinstance(value, Exception):
                 raise value
@@ -69,13 +82,12 @@ def fake_world(monkeypatch, make_settings, sample_cv, tmp_path):
     settings = make_settings(db_url="postgresql://falsa", output_dir=tmp_path / "out", log_dir=tmp_path / "logs")
     info = EmbeddingsInfo(DeterministicFakeEmbedding(size=8), "google", "google:fake")
 
-    def run(job_text=JOB_ES):
+    def run(job_text=JOB_ES, cv_text=CV_TEXT, **kwargs):
         # Un vector store cualquiera: el recuperador y la sincronización son falsos
-        result = runner.run_agent(CV_TEXT, job_text, settings, embeddings_info=info)
-        return result
+        return runner.run_agent(cv_text, job_text, settings, embeddings_info=info, **kwargs)
 
     return {"run": run, "calls": calls, "retrieval_results": retrieval_results,
-            "job_result": job_result, "settings": settings}
+            "job_result": job_result, "settings": settings, "store": store}
 
 
 @pytest.fixture(autouse=True)
@@ -154,13 +166,42 @@ def test_auditoria_un_evento_por_nodo_sin_datos_personales(fake_world, sample_cv
     log = fake_world["settings"].log_dir / "audit.jsonl"
     events = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
     assert sorted(e["node"] for e in events) == sorted(
-        ["ingest_cv", "analyze_job", "plan", "retrieve", "generate", "render_and_save"])
+        ["load_memory", "ingest_cv", "index_cv", "analyze_job", "plan", "retrieve", "generate", "render_and_save"])
     assert {e["run_id"] for e in events} == {result.run_id}
     assert all(e["status"] == "ok" for e in events)
 
     text = log.read_text(encoding="utf-8")
     for personal in (sample_cv.candidate_name, sample_cv.email, sample_cv.phone, result.candidate_id):
         assert personal not in text
+
+
+def test_memoria_evita_llamadas_a_modelos_y_el_hilo_conserva_su_estado(fake_world):
+    calls = fake_world["calls"]
+    first = fake_world["run"](thread_id="demo")
+    assert (first.cv_from_memory, first.job_from_memory, first.runs_in_thread) == (False, False, 1)
+    assert (calls["parse"], calls["job"]) == (1, 1)
+
+    # Mismo CV, misma oferta y mismo hilo: sin llamadas de extracción, el estado continúa
+    # y las métricas son solo de esta ejecución (el estado se recarga desde el checkpoint)
+    second = fake_world["run"](thread_id="demo")
+    assert (second.cv_from_memory, second.job_from_memory, second.runs_in_thread) == (True, True, 2)
+    assert (calls["parse"], calls["job"]) == (1, 1)
+    assert second.parsed_cv == first.parsed_cv and second.job_reqs == first.job_reqs
+    assert [m.step for m in second.metrics].count("generate") == 1
+    assert len(second.similar_generations) == 1
+
+    # Un CV editado se vuelve a procesar, y luego el anterior ya no cuenta como vigente
+    assert not fake_world["run"](cv_text=CV_TEXT + " Editado.").cv_from_memory
+    assert calls["parse"] == 2
+    assert not fake_world["run"]().cv_from_memory
+    assert calls["parse"] == 3
+
+    # --reprocesar ignora la memoria; las preferencias guardadas llegan al plan
+    fake_world["store"].put(("preferences", first.candidate_id), "p1", {"text": "omitir intereses"})
+    result = fake_world["run"](reprocess=True)
+    assert calls["parse"] == 4 and calls["job"] == 2
+    assert result.preferences == ["omitir intereses"]
+    assert "omitir intereses" in calls["generate_plan"]
 
 
 def test_error_en_un_nodo_queda_auditado(fake_world, monkeypatch):
@@ -186,12 +227,12 @@ def test_ruta_despues_de_recuperar(docs, attempts, expected):
 
 def test_diagrama_mermaid():
     mermaid = builder.graph_mermaid()
-    for node in ("ingest_cv", "analyze_job", "plan", "retrieve", "generate", "render_and_save"):
+    for node in ("load_memory", "ingest_cv", "index_cv", "analyze_job", "plan", "retrieve", "generate", "render_and_save"):
         assert node in mermaid
     # Arista condicional: reintento de la recuperación o paso a la generación
     assert "retrieve -.-> retrieve" in mermaid
     assert "retrieve -.-> generate" in mermaid
-    assert "__start__ --> analyze_job" in mermaid and "__start__ --> ingest_cv" in mermaid
+    assert "load_memory -.-> analyze_job" in mermaid and "load_memory -.-> index_cv" in mermaid
 
 
 def test_cli_graph_guarda_markdown(tmp_path, capsys):

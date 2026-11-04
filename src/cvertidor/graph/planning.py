@@ -90,7 +90,13 @@ def requirement_in_cv(requirement: str, haystack: str) -> bool:
     return bool(words) and all(re.search(rf"(?<![a-z0-9]){re.escape(w)}(?![a-z0-9])", haystack) for w in words)
 
 
-def build_plan(cv: StandardCV, job: JobRequirements, job_text: str, cv_text: str = "") -> Plan:
+def build_plan(
+    cv: StandardCV,
+    job: JobRequirements,
+    job_text: str,
+    cv_text: str = "",
+    preferences: list[str] | None = None,
+) -> Plan:
     # El idioma detectado en el texto manda; el que informó el modelo solo desempata
     output_language = detect_language(job_text) or job.language
     cv_language = detect_language(cv_text or cv_haystack(cv)) or "es"
@@ -122,6 +128,8 @@ def build_plan(cv: StandardCV, job: JobRequirements, job_text: str, cv_text: str
     if low_coverage:
         lines.append("El candidato cumple pocos requisitos obligatorios: destaca habilidades transferibles "
                      "y formación respaldadas por el contexto.")
+    if preferences:
+        lines.append("Preferencias recordadas del usuario: " + "; ".join(preferences) + ".")
 
     return Plan(
         output_language=output_language,

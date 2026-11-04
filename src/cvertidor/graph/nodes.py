@@ -4,11 +4,15 @@ actualización del estado; la clave opcional "audit" va al registro de auditorí
 import time
 from typing import Any
 
+from langchain_core.documents import Document
+from langgraph.config import get_store
+
 from cvertidor.graph.edges import MAX_RETRIEVAL_ATTEMPTS, has_work_history
 from cvertidor.graph.planning import build_plan
 from cvertidor.graph.state import AgentContext, AgentState
 from cvertidor.ingestion.pii import mask_pii
 from cvertidor.llm.providers import get_structured_model
+from cvertidor.memory import store as memory
 from cvertidor.observability import anonymize
 from cvertidor.pipeline import (
     GenerationError,
@@ -35,39 +39,79 @@ def _model_name(raw: Any) -> str | None:
     return (getattr(raw, "response_metadata", None) or {}).get("model_name")
 
 
+def load_memory(state: AgentState, ctx: AgentContext) -> dict:
+    """Primera decisión del agente: reutiliza el CV y la oferta si ya los procesó antes"""
+    store = get_store()
+    cv_hash, job_hash = memory.text_hash(state["cv_text"]), memory.text_hash(state["job_text"])
+    profile = None if ctx.reprocess else memory.load_profile(store, cv_hash)
+    job_reqs = None if ctx.reprocess else memory.load_job(store, job_hash)
+
+    update = {
+        "runs_in_thread": state.get("runs_in_thread", 0) + 1,
+        "cv_hash": cv_hash,
+        "job_hash": job_hash,
+        "cv_from_memory": profile is not None,
+        "job_from_memory": job_reqs is not None,
+    }
+    if profile:
+        update["candidate_id"], update["parsed_cv"] = profile
+    if job_reqs:
+        update["job_reqs"] = job_reqs
+    update["audit"] = {
+        "cv_from_memory": profile is not None,
+        "job_from_memory": job_reqs is not None,
+        "runs_in_thread": update["runs_in_thread"],
+        "reprocess": ctx.reprocess,
+    }
+    return update
+
+
 def ingest_cv(state: AgentState, ctx: AgentContext) -> dict:
-    """Estructura el CV (con la PII enmascarada) e indexa sus fragmentos en pgvector"""
+    """Estructura el CV (con la PII enmascarada) y lo guarda en la memoria de largo plazo"""
     start = time.perf_counter()
     parsed_cv, removed, raw = parse_cv(state["cv_text"], ctx.settings)
-    metrics = [step_metrics("parse", start, raw)]
+    metrics = step_metrics("parse", start, raw)
     warnings = []
     if removed:
         warnings.append("Se descartaron datos de contacto que no están en el CV original: " + ", ".join(removed))
 
     candidate_id = make_candidate_id(parsed_cv.candidate_name)
-    docs = create_cv_documents(parsed_cv)
-
-    start = time.perf_counter()
-    info = ctx.embeddings()
-    if info.is_fallback:
-        warnings.append(f"Se usaron embeddings locales ({info.model}) porque el proveedor no respondió.")
-    sync = sync_candidate_docs(ctx.vector_store(), ctx.settings.require_db_url(), candidate_id, docs)
-    metrics.append(step_metrics("index", start))
-
+    memory.save_profile(get_store(), candidate_id, state["cv_hash"], parsed_cv)
     return {
         "candidate_id": candidate_id,
         "parsed_cv": parsed_cv,
-        "sync": sync,
         "warnings": warnings,
-        "metrics": metrics,
+        "metrics": [metrics],
         "audit": {
             "candidate": anonymize(candidate_id),
-            "model": _model_name(raw),
+            "model": metrics.model,
+            "input_tokens": metrics.input_tokens,
+            "output_tokens": metrics.output_tokens,
+            "contact_discarded": len(removed),
+        },
+    }
+
+
+def index_cv(state: AgentState, ctx: AgentContext) -> dict:
+    """Sincroniza los fragmentos en pgvector; sin cambios no se llama al modelo de embeddings"""
+    start = time.perf_counter()
+    candidate_id = state["candidate_id"]
+    docs = create_cv_documents(state["parsed_cv"])
+    info = ctx.embeddings()
+    warnings = []
+    if info.is_fallback:
+        warnings.append(f"Se usaron embeddings locales ({info.model}) porque el proveedor no respondió.")
+    sync = sync_candidate_docs(ctx.vector_store(), ctx.settings.require_db_url(), candidate_id, docs)
+    return {
+        "sync": sync,
+        "warnings": warnings,
+        "metrics": [step_metrics("index", start)],
+        "audit": {
+            "candidate": anonymize(candidate_id),
             "chunks": len(docs),
             "added": sync.added,
             "removed": sync.removed,
             "unchanged": sync.unchanged,
-            "contact_discarded": len(removed),
             "embeddings": info.model,
         },
     }
@@ -81,6 +125,7 @@ def analyze_job(state: AgentState, ctx: AgentContext) -> dict:
     try:
         job_reqs, raw = invoke_structured(chain, {"job_description": mask_pii(state["job_text"]).text}, "JobRequirements")
         decision, warnings = "ok", []
+        memory.save_job(get_store(), state["job_hash"], job_reqs)
     except GenerationError as error:
         job_reqs, raw = JobRequirements(), None
         decision = "sin_requisitos"
@@ -101,12 +146,26 @@ def analyze_job(state: AgentState, ctx: AgentContext) -> dict:
 
 
 def plan(state: AgentState, ctx: AgentContext) -> dict:
-    """Decide el idioma de salida, el orden de las secciones y las consultas de recuperación"""
-    result = build_plan(state["parsed_cv"], state["job_reqs"], state["job_text"], state["cv_text"])
+    """Decide el idioma de salida, el orden de las secciones y las consultas de recuperación,
+    considerando lo que recuerda del candidato"""
+    store, candidate_id = get_store(), state["candidate_id"]
+    preferences = memory.load_preferences(store, candidate_id)
+    warnings = []
+    try:
+        similar = memory.find_similar_generations(store, candidate_id, mask_pii(state["job_text"]).text)
+    except Exception as error:
+        # El recuerdo semántico es opcional: si el modelo de embeddings falla, se sigue sin él
+        similar = []
+        warnings.append(f"No se pudieron consultar las generaciones anteriores ({type(error).__name__}).")
+
+    result = build_plan(state["parsed_cv"], state["job_reqs"], state["job_text"], state["cv_text"], preferences)
     return {
         "plan": result,
+        "preferences": preferences,
+        "similar_generations": similar,
         "retrieval_attempts": 0,
         "retrieved_docs": [],
+        "warnings": warnings,
         "audit": {
             "output_language": result.output_language,
             "translate": result.translate,
@@ -114,6 +173,8 @@ def plan(state: AgentState, ctx: AgentContext) -> dict:
             "missing": len(result.missing_requirements),
             "section_priority": result.section_priority,
             "retrieval_queries": len(result.retrieval_queries),
+            "preferences": len(preferences),
+            "similar_generations": [s["score"] for s in similar],
         },
     }
 
@@ -130,7 +191,8 @@ def retrieve(state: AgentState, ctx: AgentContext) -> dict:
     base = similarity_threshold(info.slug)
     threshold = max(MIN_RETRIEVAL_THRESHOLD, round(base - attempt * RETRIEVAL_THRESHOLD_STEP, 2))
     retriever = build_retriever(ctx.vector_store(), info.embeddings, state["candidate_id"], threshold)
-    found = retriever.invoke(query)
+    # EmbeddingsFilter devuelve una subclase interna que el checkpointer no sabe serializar
+    found = [Document(page_content=d.page_content, metadata=d.metadata) for d in retriever.invoke(query)]
 
     seen = set()
     docs = []
@@ -187,14 +249,31 @@ def generate(state: AgentState, ctx: AgentContext) -> dict:
 
 
 def render_and_save(state: AgentState, ctx: AgentContext) -> dict:
-    lang = state["plan"].output_language
+    plan_result, job_reqs = state["plan"], state["job_reqs"]
+    lang = plan_result.output_language
     markdown = cv_to_markdown(state["draft_cv"], lang=lang)
     html = cv_to_html(state["draft_cv"], lang=lang)
     paths = save_outputs(state["candidate_id"], markdown, html, ctx.settings.output_dir)
+
+    warnings = []
+    try:
+        memory.save_generation(get_store(), state["candidate_id"], mask_pii(state["job_text"]).text, markdown, {
+            "job_title": job_reqs.title,
+            "language": lang,
+            "skill_coverage": plan_result.skill_coverage,
+            "missing_requirements": plan_result.missing_requirements,
+            "files": [str(p) for p in paths],
+            "thread_id": ctx.thread_id,
+        })
+    except Exception as error:
+        # El CV ya está guardado en disco: perder el registro no invalida la ejecución
+        warnings.append(f"No se pudo registrar la generación en la memoria ({type(error).__name__}).")
+
     return {
         "markdown": markdown,
         "html": html,
         "output_paths": [str(p) for p in paths],
+        "warnings": warnings,
         # Los nombres de archivo llevan el nombre del candidato: solo se registran las extensiones
         "audit": {"files": [p.suffix for p in paths], "language": lang},
     }

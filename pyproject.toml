@@ -27,6 +27,7 @@ dependencies = [
     "pypdf>=6.21.4",
     "python-docx>=1.2.0",
     "langgraph>=1.2.19",
+    "langgraph-checkpoint-postgres>=3.2.0",
 ]
 
 [project.scripts]

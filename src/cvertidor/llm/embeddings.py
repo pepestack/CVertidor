@@ -22,6 +22,8 @@ class EmbeddingsInfo:
     slug: str
     model: str
     is_fallback: bool = False
+    # Tamaño de los vectores; None si no se midió
+    dims: int | None = None
 
 
 def embedding_slug(spec: ModelSpec) -> str:
@@ -79,8 +81,8 @@ def get_embeddings(
 
     try:
         embeddings = build_embeddings(spec, settings)
-        embeddings.embed_query("test")
-        return EmbeddingsInfo(embeddings, embedding_slug(spec), str(spec))
+        vector = embeddings.embed_query("test")
+        return EmbeddingsInfo(embeddings, embedding_slug(spec), str(spec), dims=len(vector))
     except Exception as error:
         logger.warning(
             "Embeddings de %s no disponibles (%s: %s). Se usará MiniLM local.",

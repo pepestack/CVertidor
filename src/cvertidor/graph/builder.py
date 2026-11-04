@@ -1,9 +1,9 @@
 """Construcción del grafo de LangGraph.
 
-    START ─┬─> ingest_cv ───┐
-           └─> analyze_job ─┴─> plan ─> retrieve ─┬─> generate ─> render_and_save ─> END
-                                          ^       │
-                                          └───────┘ sin experiencia relevante (máx. 3 intentos)
+    START ─> load_memory ─┬─> [CV nuevo] ingest_cv ─┬─> index_cv ─┐
+                          ├─> [CV conocido] ────────┘             ├─> plan ─> retrieve ─┬─> generate ─> render_and_save ─> END
+                          └─> [oferta nueva] analyze_job ─────────┘             ^       │
+                                                                                └───────┘ sin experiencia relevante (máx. 3 intentos)
 """
 
 import time
@@ -13,14 +13,16 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 
 from cvertidor.graph import nodes
-from cvertidor.graph.edges import route_after_retrieve
+from cvertidor.graph.edges import route_after_memory, route_after_retrieve
 from cvertidor.graph.state import AgentContext, AgentState
 
 NodeFn = Callable[[AgentState, AgentContext], dict]
 
 # Mensaje de progreso de cada nodo; el de retrieve cambia en los reintentos
 STEP_LABELS: dict[str, Callable[[AgentState], str]] = {
-    "ingest_cv": lambda s: "Extrayendo la estructura del CV (datos personales enmascarados) e indexándolo en pgvector...",
+    "load_memory": lambda s: "Consultando la memoria del agente...",
+    "ingest_cv": lambda s: "Extrayendo la estructura del CV (datos personales enmascarados)...",
+    "index_cv": lambda s: "Sincronizando los fragmentos del CV en pgvector...",
     "analyze_job": lambda s: "Analizando los requisitos de la oferta...",
     "plan": lambda s: "Planificando la adaptación (idioma, prioridades y consultas)...",
     "retrieve": lambda s: (
@@ -54,13 +56,16 @@ def audited(name: str, fn: NodeFn):
 
 def build_graph(checkpointer=None, store=None):
     builder = StateGraph(AgentState, context_schema=AgentContext)
-    for name in ("ingest_cv", "analyze_job", "plan", "retrieve", "generate", "render_and_save"):
+    for name in ("load_memory", "ingest_cv", "index_cv", "analyze_job", "retrieve", "generate", "render_and_save"):
         builder.add_node(name, audited(name, getattr(nodes, name)))
+    # defer: plan espera a que terminen las ramas que se hayan activado (pueden ser una o dos)
+    builder.add_node("plan", audited("plan", nodes.plan), defer=True)
 
-    # El CV y la oferta se analizan en paralelo; plan espera a ambos
-    builder.add_edge(START, "ingest_cv")
-    builder.add_edge(START, "analyze_job")
-    builder.add_edge(["ingest_cv", "analyze_job"], "plan")
+    builder.add_edge(START, "load_memory")
+    builder.add_conditional_edges("load_memory", route_after_memory, ["ingest_cv", "index_cv", "analyze_job"])
+    builder.add_edge("ingest_cv", "index_cv")
+    builder.add_edge("index_cv", "plan")
+    builder.add_edge("analyze_job", "plan")
     builder.add_edge("plan", "retrieve")
     builder.add_conditional_edges("retrieve", route_after_retrieve, ["retrieve", "generate"])
     builder.add_edge("generate", "render_and_save")

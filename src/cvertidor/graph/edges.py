@@ -17,6 +17,15 @@ def has_work_history(docs: list[Document]) -> bool:
     return sum(d.metadata.get("section") == "work_history" for d in docs) >= MIN_WORK_HISTORY_CHUNKS
 
 
+def route_after_memory(state: AgentState) -> list[str]:
+    """Solo se llama a los modelos para lo que la memoria no tiene: un CV sin cambios pasa
+    directo a indexar y una oferta ya analizada no se vuelve a analizar"""
+    routes = ["index_cv" if state.get("cv_from_memory") else "ingest_cv"]
+    if not state.get("job_from_memory"):
+        routes.append("analyze_job")
+    return routes
+
+
 def route_after_retrieve(state: AgentState) -> Literal["retrieve", "generate"]:
     """Sin experiencia laboral relevante se reintenta con una consulta y un umbral más
     amplios; al agotar los intentos se genera igual (con un aviso)"""
