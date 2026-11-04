@@ -42,17 +42,26 @@ def retries_left(state: AgentState) -> bool:
     return state.get("generation_attempts", 0) < MAX_GENERATION_ATTEMPTS and not state.get("draft_repeated")
 
 
-def route_after_validate(state: AgentState) -> Literal["render_and_save", "generate", "judge"]:
-    """Aprobado se guarda; rechazado se corrige mientras queden intentos; dudoso va al juez"""
+def route_by_verdict(state: AgentState) -> Literal["human_review", "render_and_save", "generate", "human_escalation"]:
+    """Aprobado pasa a la revisión humana; rechazado se corrige mientras queden intentos.
+    Lo que la automatización no resuelve siempre lo decide una persona, incluso con --auto"""
     status = state["verdict"].status
-    if status == "uncertain":
-        return "judge"
-    return route_after_judge(state)
-
-
-def route_after_judge(state: AgentState) -> Literal["render_and_save", "generate"]:
-    """Sin intentos, o si el juez tampoco pudo decidir, se guarda con un aviso (en el batch 7 decide una persona)"""
-    verdict = state["verdict"]
-    if retries_left(state) and verdict.status == "rejected":
+    if status == "approved":
+        return "render_and_save" if state.get("auto_approve") else "human_review"
+    if status == "rejected" and retries_left(state):
         return "generate"
-    return "render_and_save"
+    return "human_escalation"
+
+
+def route_after_validate(state: AgentState) -> str:
+    """Un resultado dudoso va primero al juez"""
+    if state["verdict"].status == "uncertain":
+        return "judge"
+    return route_by_verdict(state)
+
+
+def route_after_human(state: AgentState) -> Literal["render_and_save", "generate", "__end__"]:
+    decision = state["human_decision"]
+    if decision == "corregir":
+        return "generate"
+    return "__end__" if decision == "descartar" else "render_and_save"

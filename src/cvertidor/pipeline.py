@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from cvertidor.config import Settings
 from cvertidor.ingestion.pii import MaskResult, mask_pii, scrub_pii, unmask
 from cvertidor.llm.providers import StructuredOutputError, get_structured_model
-from cvertidor.prompts.generation import GENERATION_PROMPT
+from cvertidor.prompts.generation import GENERATION_PROMPT, REVISION_BLOCK
 from cvertidor.prompts.parsing import PARSING_PROMPT
 from cvertidor.schemas.cv import StandardCV
 
@@ -138,11 +138,14 @@ def generate_adapted_cv(
     parsed_cv: StandardCV,
     settings: Settings,
     plan: str = "",
+    current_draft: str | None = None,
 ) -> tuple[StandardCV, Any]:
+    """Con `current_draft` edita ese borrador según las correcciones de una persona, en vez de reescribir"""
     chain = GENERATION_PROMPT | get_structured_model("generator", StandardCV, include_raw=True, settings=settings)
     adapted, raw = invoke_structured(
         chain,
-        {"context": context, "job_description": scrub_pii(job_text), "plan": plan or "- Sin instrucciones adicionales."},
+        {"context": context, "job_description": scrub_pii(job_text), "plan": plan or "- Sin instrucciones adicionales.",
+         "revision": REVISION_BLOCK.format(draft=current_draft) if current_draft else ""},
         "StandardCV adaptado",
     )
     # El contexto va enmascarado: se restauran los marcadores que el modelo haya copiado
@@ -152,7 +155,9 @@ def generate_adapted_cv(
     adapted.location = parsed_cv.location
     for name in CONTACT_FIELDS:
         setattr(adapted, name, getattr(parsed_cv, name))
-    restore_roles(adapted, parsed_cv)
+    # Una persona puede haber pedido cambiar un cargo
+    if not current_draft:
+        restore_roles(adapted, parsed_cv)
     return adapted, raw
 
 

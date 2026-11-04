@@ -5,25 +5,37 @@
                           └─> [oferta nueva] analyze_job ─────────┘             ^       │
                                                                                 └───────┘ sin experiencia relevante (máx. 3 intentos)
 
-    generate ─> validate ─┬─> [aprobado] render_and_save
-       ^                  ├─> [dudoso] judge ─┬─> [aprobado] render_and_save
-       │                  │                   │
-       └── [rechazado, máx. 3 intentos] ──────┘
+    generate ─> validate ─┬─> [aprobado] human_review ⏸ ─┬─> [aprobar] render_and_save ─> END
+       ^                  ├─> [dudoso] judge (decide igual) │
+       ├── [rechazado, máx. 3 intentos]                     ├─> [corregir] generate
+       │                  └─> [sin resolver] human_escalation ⏸ ─┬─> [aceptar] render_and_save
+       └── [corregir, una vez] ──────────────────────────────────┤
+                                                                 └─> [descartar] END
+
+    Con --auto, un CV aprobado pasa directo a render_and_save.
 """
 
 import time
 from collections.abc import Callable
 
+from langgraph.errors import GraphBubbleUp
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 
 from cvertidor.graph import nodes
-from cvertidor.graph.edges import route_after_judge, route_after_memory, route_after_retrieve, route_after_validate
+from cvertidor.graph.edges import (
+    route_after_human,
+    route_after_memory,
+    route_after_retrieve,
+    route_after_validate,
+    route_by_verdict,
+)
 from cvertidor.graph.state import AgentContext, AgentState
 
 NodeFn = Callable[[AgentState, AgentContext], dict]
 
-# Mensaje de progreso de cada nodo; el de retrieve cambia en los reintentos
+# Mensaje de progreso de cada nodo; el de retrieve cambia en los reintentos. Los nodos humanos
+# no tienen: muestran su pregunta, y al retomar se ejecutan de nuevo
 STEP_LABELS: dict[str, Callable[[AgentState], str]] = {
     "load_memory": lambda s: "Consultando la memoria del agente...",
     "ingest_cv": lambda s: "Extrayendo la estructura del CV (datos personales enmascarados)...",
@@ -36,6 +48,7 @@ STEP_LABELS: dict[str, Callable[[AgentState], str]] = {
     ),
     "generate": lambda s: (
         "Generando el CV adaptado a la oferta..." if not s.get("generation_attempts")
+        else f"Aplicando las correcciones de la persona (intento {s['generation_attempts'] + 1})..." if s.get("human_corrections")
         else f"Corrigiendo el CV según la validación (intento {s['generation_attempts'] + 1})..."
     ),
     "validate": lambda s: "Validando el CV generado...",
@@ -48,10 +61,15 @@ def audited(name: str, fn: NodeFn):
     """Envuelve un nodo: informa el progreso, mide el tiempo y registra el evento de auditoría"""
     def node(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
         ctx = runtime.context
-        ctx.on_step(STEP_LABELS[name](state))
+        if name in STEP_LABELS:
+            ctx.on_step(STEP_LABELS[name](state))
         start = time.perf_counter()
         try:
             update = fn(state, ctx)
+        except GraphBubbleUp:
+            # interrupt() pausa el grafo lanzando esta excepción: no es un error
+            ctx.audit.record(name, status="paused", seconds=round(time.perf_counter() - start, 3))
+            raise
         except Exception as error:
             ctx.audit.record(name, status="error", seconds=round(time.perf_counter() - start, 3),
                              error=type(error).__name__)
@@ -67,7 +85,7 @@ def audited(name: str, fn: NodeFn):
 def build_graph(checkpointer=None, store=None):
     builder = StateGraph(AgentState, context_schema=AgentContext)
     for name in ("load_memory", "ingest_cv", "index_cv", "analyze_job", "retrieve", "generate", "validate", "judge",
-                 "render_and_save"):
+                 "human_review", "human_escalation", "render_and_save"):
         builder.add_node(name, audited(name, getattr(nodes, name)))
     # defer: plan espera a que terminen las ramas que se hayan activado (pueden ser una o dos)
     builder.add_node("plan", audited("plan", nodes.plan), defer=True)
@@ -80,8 +98,12 @@ def build_graph(checkpointer=None, store=None):
     builder.add_edge("plan", "retrieve")
     builder.add_conditional_edges("retrieve", route_after_retrieve, ["retrieve", "generate"])
     builder.add_edge("generate", "validate")
-    builder.add_conditional_edges("validate", route_after_validate, ["render_and_save", "generate", "judge"])
-    builder.add_conditional_edges("judge", route_after_judge, ["render_and_save", "generate"])
+    builder.add_conditional_edges("validate", route_after_validate,
+                                  ["human_review", "render_and_save", "generate", "judge", "human_escalation"])
+    builder.add_conditional_edges("judge", route_by_verdict,
+                                  ["human_review", "render_and_save", "generate", "human_escalation"])
+    for name in ("human_review", "human_escalation"):
+        builder.add_conditional_edges(name, route_after_human, ["render_and_save", "generate", END])
     builder.add_edge("render_and_save", END)
     return builder.compile(checkpointer=checkpointer, store=store)
 

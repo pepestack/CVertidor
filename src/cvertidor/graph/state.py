@@ -29,6 +29,9 @@ class AgentState(TypedDict, total=False):
     # Entrada
     cv_text: str
     job_text: str
+    run_id: str
+    # Omite la revisión humana de un CV aprobado (la escalación siempre pregunta)
+    auto_approve: bool
     # load_memory: qué se reutilizó de la memoria de largo plazo
     runs_in_thread: int
     cv_hash: str
@@ -54,6 +57,11 @@ class AgentState(TypedDict, total=False):
     context: str
     draft_cv: StandardCV
     verdict: Verdict
+    # human_review y human_escalation
+    human_decision: str | None
+    # Se acumulan durante la ejecución, enmascaradas. No pasan al perfil de largo plazo
+    human_corrections: list[str]
+    escalation_resets: int
     # render_and_save
     markdown: str
     html: str

@@ -13,7 +13,7 @@ from cvertidor import cli, pipeline
 from cvertidor.graph import builder, edges, nodes, runner
 from cvertidor.llm.decisions import DecisionError, DecisionResult
 from cvertidor.llm.embeddings import EmbeddingsInfo
-from cvertidor.pipeline import GenerationError
+from cvertidor.pipeline import GenerationError, InputError
 from cvertidor.rag.vector_store import SyncStats
 from cvertidor.schemas.evaluation import JudgeReview
 from cvertidor.schemas.job import JobRequirements
@@ -84,7 +84,8 @@ def fake_world(monkeypatch, make_settings, sample_cv, tmp_path):
 
     monkeypatch.setattr(nodes, "build_retriever", fake_retriever)
 
-    def fake_generate(context, job_text, parsed_cv, settings, plan=""):
+    def fake_generate(context, job_text, parsed_cv, settings, plan="", current_draft=None):
+        calls["current_draft"] = current_draft
         calls["generate_plan"] = plan
         calls["generate"] += 1
         calls["context"] = context
@@ -101,9 +102,14 @@ def fake_world(monkeypatch, make_settings, sample_cv, tmp_path):
 
     def run(job_text=JOB_ES, cv_text=CV_TEXT, **kwargs):
         # Un vector store cualquiera: el recuperador y la sincronización son falsos
+        kwargs.setdefault("auto_approve", True)
         return runner.run_agent(cv_text, job_text, settings, embeddings_info=info, **kwargs)
 
-    return {"run": run, "calls": calls, "retrieval_results": retrieval_results,
+    def resume(thread_id, action, feedback=None):
+        # El grafo se vuelve a compilar: equivale a retomar desde otro proceso
+        return runner.resume_agent(thread_id, action, feedback, settings, embeddings_info=info)
+
+    return {"run": run, "resume": resume, "calls": calls, "retrieval_results": retrieval_results,
             "job_result": job_result, "settings": settings, "store": store,
             "decision": decision, "judge_review": judge_review}
 
@@ -158,7 +164,10 @@ def test_agota_los_intentos_y_genera_con_aviso(fake_world):
 
 
 def test_oferta_en_ingles_genera_en_ingles(fake_world):
-    result = fake_world["run"](JOB_EN)
+    # El generador falso responde en español: el chequeo de idioma lo detecta y decide una persona
+    pending = fake_world["run"](JOB_EN, thread_id="ingles")
+    assert any("idioma de salida es 'en'" in issue for issue in pending.issues)
+    result = fake_world["resume"]("ingles", "aceptar")
 
     assert result.plan.output_language == "en"
     assert "Traduce el contenido del candidato del español al inglés." in fake_world["calls"]["generate_plan"]
@@ -263,21 +272,20 @@ def test_ningun_dato_personal_llega_a_los_modelos(fake_world, monkeypatch, sampl
 def test_rechazo_corrige_con_retroalimentacion_hasta_tres_intentos(fake_world):
     fake_world["decision"]["value"] = DecisionResult({"inventa_datos": 0.96, "omite_requisitos": 0.01})
 
-    result = fake_world["run"]()
+    pending = fake_world["run"]()
 
-    assert fake_world["calls"]["generate"] == result.generation_attempts == 3
+    assert fake_world["calls"]["generate"] == pending.attempts == 3
     assert "Correcciones obligatorias" in fake_world["calls"]["generate_plan"]
-    assert result.verdict.status == "rejected" and result.output_paths
-    assert any("sin aprobarse tras 3 intentos" in w for w in result.warnings)
+    assert (pending.kind, pending.status) == ("escalation", "rejected")
     assert fake_world["calls"]["judge"] == 0
 
     # Un reintento que devuelve el mismo borrador corta el bucle: repetirlo solo gastaría tokens
     fake_world["calls"].update(generate=0, same_draft=True)
-    assert fake_world["run"]().generation_attempts == 2
+    assert fake_world["run"]().attempts == 2
 
 
 def test_experiencia_omitida_se_restaura_sin_gastar_otro_intento(fake_world, monkeypatch):
-    def without_roles(context, job_text, parsed_cv, settings, plan=""):
+    def without_roles(context, job_text, parsed_cv, settings, plan="", current_draft=None):
         return parsed_cv.model_copy(update={"work_history": []}, deep=True), ai()
 
     monkeypatch.setattr(nodes, "generate_adapted_cv", without_roles)
@@ -295,18 +303,101 @@ def test_dudoso_o_sin_modelo_de_decision_decide_el_juez(fake_world):
     assert fake_world["calls"]["judge"] == 1
     assert (result.verdict.status, result.verdict.source, result.generation_attempts) == ("approved", "judge", 1)
 
-    # Sin modelo de decisión, y además el juez rechaza una vez: se corrige con su retroalimentación
+    # Sin modelo de decisión, y además el juez rechaza: se corrige con su retroalimentación
     fake_world["decision"]["value"] = DecisionError("sin clave")
     fake_world["judge_review"]["value"] = JudgeReview(approved=False, feedback="Quita la cifra inventada.")
-    result = fake_world["run"]()
+    pending = fake_world["run"]()
     assert "Quita la cifra inventada." in fake_world["calls"]["generate_plan"]
-    assert result.generation_attempts == 3
+    assert (pending.kind, pending.attempts) == ("escalation", 3)
 
-    # Si tampoco responde el juez, el CV se guarda con un aviso claro y sin reintentar
+    # Si tampoco responde el juez, sin reintentar decide una persona, incluso con --auto
     fake_world["judge_review"]["value"] = ConnectionError("caído")
-    result = fake_world["run"]()
-    assert (result.verdict.status, result.generation_attempts) == ("uncertain", 1)
-    assert any("Nadie pudo evaluar" in w for w in result.warnings)
+    pending = fake_world["run"]()
+    assert (pending.kind, pending.status, pending.attempts) == ("escalation", "uncertain", 1)
+
+
+def test_revision_humana_pausa_y_se_retoma(fake_world):
+    pending = fake_world["run"](auto_approve=False, thread_id="revision")
+    assert isinstance(pending, runner.PendingDecision)
+    assert (pending.kind, pending.options) == ("review", ["aprobar", "corregir", "descartar"])
+    assert "## Experiencia Laboral" in pending.preview
+    assert not list(fake_world["settings"].output_dir.glob("*"))  # aún no se guarda nada
+
+    # Mientras espera no se puede iniciar otra ejecución ni dar una decisión inválida
+    with pytest.raises(InputError, match="decisión pendiente"):
+        fake_world["run"](auto_approve=False, thread_id="revision")
+    with pytest.raises(InputError, match="no válida"):
+        fake_world["resume"]("revision", "aceptar")
+    with pytest.raises(InputError, match="qué cambiar"):
+        fake_world["resume"]("revision", "corregir", "  ")
+
+    # Corregir regenera con la instrucción (sin datos personales) y vuelve a preguntar
+    again = fake_world["resume"]("revision", "corregir", "Quita los intereses de ana@empresa.cl")
+    assert isinstance(again, runner.PendingDecision) and again.attempts == 2
+    context = fake_world["calls"]["context"]
+    assert "Quita los intereses" in context and "ana@empresa.cl" not in context
+
+    result = fake_world["resume"]("revision", "aprobar")
+    assert result.human_decision == "aprobar" and all(p.exists() for p in result.output_paths)
+    with pytest.raises(InputError, match="ninguna decisión"):
+        fake_world["resume"]("revision", "aprobar")
+
+    # Descartar termina sin archivos, aunque el hilo tenga los de la ejecución anterior
+    fake_world["run"](auto_approve=False, thread_id="revision")
+    discarded = fake_world["resume"]("revision", "descartar")
+    assert discarded.discarded and discarded.output_paths == []
+
+
+def test_correcciones_se_acumulan_editan_el_borrador_y_pueden_agregar_datos(fake_world, monkeypatch):
+    calls = fake_world["calls"]
+
+    def fake_edit(context, job_text, parsed_cv, settings, plan="", current_draft=None):
+        calls.update(context=context, current_draft=current_draft)
+        draft = parsed_cv.model_copy(deep=True)
+        if "Claude Code" in context:
+            draft.technical_skills = [*draft.technical_skills, "Claude Code"]
+        return draft, ai()
+
+    monkeypatch.setattr(nodes, "generate_adapted_cv", fake_edit)
+    fake_world["run"](auto_approve=False, thread_id="edita")
+    assert calls["current_draft"] is None
+
+    # Un dato que no está en el CV pasa la validación porque lo confirmó una persona; quitar
+    # un requisito a propósito (omisión alta) tampoco hace que el sistema lo vuelva a poner
+    fake_world["decision"]["value"] = DecisionResult({"inventa_datos": 0.01, "omite_requisitos": 0.99})
+    first = fake_world["resume"]("edita", "corregir", "Añadir Claude Code")
+    assert first.status == "approved" and "Claude Code" in first.preview
+    assert "## Experiencia Laboral" in calls["current_draft"]
+
+    second = fake_world["resume"]("edita", "corregir", "Quitar Looker")
+    assert second.corrections == ["Añadir Claude Code", "Quitar Looker"]
+    assert "Añadir Claude Code" in calls["context"] and "Quitar Looker" in calls["context"]
+    assert "Claude Code" in calls["current_draft"]  # edita sobre el resultado de la corrección anterior
+
+    result = fake_world["resume"]("edita", "aprobar")
+    assert "Claude Code" in result.adapted_cv.technical_skills
+    assert any("indicados por una persona" in w and "Claude Code" in w for w in result.warnings)
+
+    # Las correcciones valen para esa ejecución: no quedan en el perfil ni en la siguiente
+    fake_world["decision"]["value"] = DecisionResult({"inventa_datos": 0.01, "omite_requisitos": 0.01})
+    next_run = fake_world["run"](thread_id="edita")
+    assert next_run.human_corrections == [] and "Claude Code" not in next_run.parsed_cv.technical_skills
+
+
+def test_escalacion_permite_corregir_una_sola_vez(fake_world):
+    fake_world["decision"]["value"] = DecisionResult({"inventa_datos": 0.96, "omite_requisitos": 0.01})
+
+    pending = fake_world["run"](thread_id="esc")  # también con --auto
+    assert pending.options == ["aceptar", "corregir", "descartar"]
+
+    # Corregir reinicia los intentos automáticos; la segunda vez ya no se ofrece
+    fake_world["calls"]["generate"] = 0
+    pending = fake_world["resume"]("esc", "corregir", "Quita lo inventado")
+    assert fake_world["calls"]["generate"] == pending.attempts == 3
+    assert pending.options == ["aceptar", "descartar"]
+
+    result = fake_world["resume"]("esc", "aceptar")
+    assert result.output_paths and any("decisión humana" in w for w in result.warnings)
 
 
 def test_error_en_un_nodo_queda_auditado(fake_world, monkeypatch):
@@ -332,7 +423,7 @@ def test_ruta_despues_de_recuperar(docs, attempts, expected):
 
 def test_diagrama_mermaid():
     mermaid = builder.graph_mermaid()
-    for node in ("load_memory", "ingest_cv", "index_cv", "analyze_job", "plan", "retrieve", "generate", "validate", "judge", "render_and_save"):
+    for node in ("load_memory", "ingest_cv", "index_cv", "analyze_job", "plan", "retrieve", "generate", "validate", "judge", "human_review", "human_escalation", "render_and_save"):
         assert node in mermaid
     # Arista condicional: reintento de la recuperación o paso a la generación
     assert "retrieve -.-> retrieve" in mermaid
