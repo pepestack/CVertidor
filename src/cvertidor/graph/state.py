@@ -14,6 +14,7 @@ from cvertidor.observability import AuditLog
 from cvertidor.pipeline import StepMetrics
 from cvertidor.rag.vector_store import SyncStats, get_vector_store
 from cvertidor.schemas.cv import StandardCV
+from cvertidor.schemas.evaluation import Verdict
 from cvertidor.schemas.job import JobRequirements
 
 
@@ -46,8 +47,14 @@ class AgentState(TypedDict, total=False):
     # retrieve (puede repetirse con consultas y umbrales más amplios)
     retrieval_attempts: int
     retrieved_docs: list[Document]
-    # generate y render_and_save
+    # generate, validate y judge (el bucle de corrección)
+    generation_attempts: int
+    # El intento repitió el borrador anterior: otro reintento no cambiaría nada
+    draft_repeated: bool
+    context: str
     draft_cv: StandardCV
+    verdict: Verdict
+    # render_and_save
     markdown: str
     html: str
     output_paths: list[str]

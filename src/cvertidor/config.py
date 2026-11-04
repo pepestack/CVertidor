@@ -83,6 +83,10 @@ class Settings(BaseSettings):
 
     embedding_model: str = "google:models/gemini-embedding-2"
 
+    # Modelo de la Decisions API de OpenRouter (gratuito). Sin OPENROUTER_API_KEY la validación
+    # usa los chequeos deterministas y el juez (ESCALATION_MODEL)
+    decision_model: str = "respan/span-01-lite:free"
+
     # Reintentos con backoff exponencial ante 429/5xx y tiempo máximo por llamada (segundos).
     # Solo el último modelo de cada cadena reintenta; los anteriores ceden de inmediato al respaldo
     llm_max_retries: int = 3

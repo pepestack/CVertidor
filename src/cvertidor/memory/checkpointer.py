@@ -14,6 +14,7 @@ CHECKPOINT_TYPES = [
     ("cvertidor.schemas.cv", "WorkExperience"),
     ("cvertidor.schemas.cv", "Certification"),
     ("cvertidor.schemas.job", "JobRequirements"),
+    ("cvertidor.schemas.evaluation", "Verdict"),
     ("cvertidor.graph.planning", "Plan"),
     ("cvertidor.pipeline", "StepMetrics"),
     ("cvertidor.rag.vector_store", "SyncStats"),

@@ -11,6 +11,8 @@ MAX_RETRIEVAL_ATTEMPTS = 3
 # Responsabilidades relevantes mínimas para armar la sección de experiencia
 # (cada responsabilidad es un chunk; con una sola, la sección queda en un único punto)
 MIN_WORK_HISTORY_CHUNKS = 2
+# Intentos totales de generación: el inicial más dos con correcciones
+MAX_GENERATION_ATTEMPTS = 3
 
 
 def has_work_history(docs: list[Document]) -> bool:
@@ -34,3 +36,23 @@ def route_after_retrieve(state: AgentState) -> Literal["retrieve", "generate"]:
     if state.get("retrieval_attempts", 0) >= MAX_RETRIEVAL_ATTEMPTS:
         return "generate"
     return "retrieve"
+
+
+def retries_left(state: AgentState) -> bool:
+    return state.get("generation_attempts", 0) < MAX_GENERATION_ATTEMPTS and not state.get("draft_repeated")
+
+
+def route_after_validate(state: AgentState) -> Literal["render_and_save", "generate", "judge"]:
+    """Aprobado se guarda; rechazado se corrige mientras queden intentos; dudoso va al juez"""
+    status = state["verdict"].status
+    if status == "uncertain":
+        return "judge"
+    return route_after_judge(state)
+
+
+def route_after_judge(state: AgentState) -> Literal["render_and_save", "generate"]:
+    """Sin intentos, o si el juez tampoco pudo decidir, se guarda con un aviso (en el batch 7 decide una persona)"""
+    verdict = state["verdict"]
+    if retries_left(state) and verdict.status == "rejected":
+        return "generate"
+    return "render_and_save"

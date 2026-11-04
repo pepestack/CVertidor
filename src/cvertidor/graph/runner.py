@@ -25,6 +25,7 @@ from cvertidor.pipeline import (
 )
 from cvertidor.rag.vector_store import SyncStats
 from cvertidor.schemas.cv import StandardCV
+from cvertidor.schemas.evaluation import Verdict
 from cvertidor.schemas.job import JobRequirements
 
 
@@ -42,6 +43,8 @@ class AgentResult:
     job_reqs: JobRequirements
     plan: Plan
     adapted_cv: StandardCV
+    verdict: Verdict
+    generation_attempts: int
     markdown: str
     html: str
     output_paths: list[Path]
@@ -99,6 +102,8 @@ def run_agent(
         job_reqs=state["job_reqs"],
         plan=state["plan"],
         adapted_cv=state["draft_cv"],
+        verdict=state["verdict"],
+        generation_attempts=state["generation_attempts"],
         markdown=state["markdown"],
         html=state["html"],
         output_paths=[Path(p) for p in state["output_paths"]],

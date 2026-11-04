@@ -5,23 +5,15 @@ No usa un LLM: las decisiones son reproducibles y se pueden probar sin red.
 """
 
 import re
-import unicodedata
 
 from pydantic import BaseModel, Field
 
 from cvertidor.ingestion.pii import scrub_pii
+from cvertidor.text import detect_language, normalize
 from cvertidor.schemas.cv import StandardCV
 from cvertidor.schemas.job import JobRequirements
 
 LANGUAGE_NAMES = {"es": "español", "en": "inglés"}
-
-# Palabras funcionales frecuentes: bastan para distinguir español de inglés en una oferta o un CV
-STOPWORDS = {
-    "es": {"de", "la", "el", "en", "y", "los", "las", "del", "con", "para", "por", "una", "un", "que", "se",
-           "experiencia", "conocimientos", "requisitos", "años", "trabajo"},
-    "en": {"the", "and", "of", "to", "in", "with", "for", "a", "an", "is", "are", "on", "you", "we", "our",
-           "experience", "requirements", "years", "skills", "work"},
-}
 
 # Con menos de esta fracción de requisitos obligatorios presentes en el CV, el plan
 # destaca habilidades y formación por sobre la experiencia
@@ -52,22 +44,6 @@ class Plan(BaseModel):
     instructions: str = ""
 
 
-def _normalize(text: str) -> str:
-    """Minúsculas y sin tildes, para comparar requisitos con el texto del CV"""
-    text = unicodedata.normalize("NFKD", text.lower())
-    return "".join(c for c in text if not unicodedata.combining(c))
-
-
-def detect_language(text: str) -> str | None:
-    """'es' o 'en' según las palabras funcionales; None si no hay suficiente evidencia"""
-    words = re.findall(r"[a-záéíóúñ]+", text.lower())
-    counts = {lang: sum(w in stop for w in words) for lang, stop in STOPWORDS.items()}
-    es, en = counts["es"], counts["en"]
-    if max(es, en) < 3 or es == en:
-        return None
-    return "es" if es > en else "en"
-
-
 def cv_haystack(cv: StandardCV) -> str:
     """Texto del CV donde se buscan los requisitos de la oferta"""
     parts = [cv.professional_summary or ""]
@@ -77,12 +53,12 @@ def cv_haystack(cv: StandardCV) -> str:
         parts += [work.role, *work.responsibilities]
     parts += [e.degree for e in cv.education]
     parts += cv.languages or []
-    return _normalize(" ".join(parts))
+    return normalize(" ".join(parts))
 
 
 def requirement_in_cv(requirement: str, haystack: str) -> bool:
     """El requisito aparece completo o todas sus palabras significativas aparecen en el CV"""
-    req = _normalize(requirement).strip()
+    req = normalize(requirement).strip()
     if not req:
         return False
     if re.search(rf"(?<![a-z0-9]){re.escape(req)}(?![a-z0-9])", haystack):

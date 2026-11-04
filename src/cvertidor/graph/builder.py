@@ -4,6 +4,11 @@
                           ├─> [CV conocido] ────────┘             ├─> plan ─> retrieve ─┬─> generate ─> render_and_save ─> END
                           └─> [oferta nueva] analyze_job ─────────┘             ^       │
                                                                                 └───────┘ sin experiencia relevante (máx. 3 intentos)
+
+    generate ─> validate ─┬─> [aprobado] render_and_save
+       ^                  ├─> [dudoso] judge ─┬─> [aprobado] render_and_save
+       │                  │                   │
+       └── [rechazado, máx. 3 intentos] ──────┘
 """
 
 import time
@@ -13,7 +18,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 
 from cvertidor.graph import nodes
-from cvertidor.graph.edges import route_after_memory, route_after_retrieve
+from cvertidor.graph.edges import route_after_judge, route_after_memory, route_after_retrieve, route_after_validate
 from cvertidor.graph.state import AgentContext, AgentState
 
 NodeFn = Callable[[AgentState, AgentContext], dict]
@@ -29,7 +34,12 @@ STEP_LABELS: dict[str, Callable[[AgentState], str]] = {
         "Recuperando la experiencia relevante para la oferta..." if not s.get("retrieval_attempts")
         else f"Sin experiencia relevante: reintentando con una consulta más amplia (intento {s['retrieval_attempts'] + 1})..."
     ),
-    "generate": lambda s: "Generando el CV adaptado a la oferta...",
+    "generate": lambda s: (
+        "Generando el CV adaptado a la oferta..." if not s.get("generation_attempts")
+        else f"Corrigiendo el CV según la validación (intento {s['generation_attempts'] + 1})..."
+    ),
+    "validate": lambda s: "Validando el CV generado...",
+    "judge": lambda s: "Resultado dudoso: consultando al juez...",
     "render_and_save": lambda s: "Guardando el CV en Markdown y HTML...",
 }
 
@@ -56,7 +66,8 @@ def audited(name: str, fn: NodeFn):
 
 def build_graph(checkpointer=None, store=None):
     builder = StateGraph(AgentState, context_schema=AgentContext)
-    for name in ("load_memory", "ingest_cv", "index_cv", "analyze_job", "retrieve", "generate", "render_and_save"):
+    for name in ("load_memory", "ingest_cv", "index_cv", "analyze_job", "retrieve", "generate", "validate", "judge",
+                 "render_and_save"):
         builder.add_node(name, audited(name, getattr(nodes, name)))
     # defer: plan espera a que terminen las ramas que se hayan activado (pueden ser una o dos)
     builder.add_node("plan", audited("plan", nodes.plan), defer=True)
@@ -68,7 +79,9 @@ def build_graph(checkpointer=None, store=None):
     builder.add_edge("analyze_job", "plan")
     builder.add_edge("plan", "retrieve")
     builder.add_conditional_edges("retrieve", route_after_retrieve, ["retrieve", "generate"])
-    builder.add_edge("generate", "render_and_save")
+    builder.add_edge("generate", "validate")
+    builder.add_conditional_edges("validate", route_after_validate, ["render_and_save", "generate", "judge"])
+    builder.add_conditional_edges("judge", route_after_judge, ["render_and_save", "generate"])
     builder.add_edge("render_and_save", END)
     return builder.compile(checkpointer=checkpointer, store=store)
 

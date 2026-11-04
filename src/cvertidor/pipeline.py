@@ -156,6 +156,15 @@ def generate_adapted_cv(
     return adapted, raw
 
 
+def restore_missing_work_history(adapted: StandardCV, original: StandardCV) -> bool:
+    """Ante una oferta poco afín los modelos eliminan toda la experiencia, y una instrucción no
+    lo corrige. Empresa, cargo y fechas son hechos conocidos: se agregan sin responsabilidades"""
+    if adapted.work_history or not original.work_history:
+        return False
+    adapted.work_history = [w.model_copy(update={"responsibilities": []}) for w in original.work_history]
+    return True
+
+
 def restore_roles(adapted: StandardCV, original: StandardCV) -> None:
     """Los cargos se conservan textualmente aunque el CV se traduzca (los modelos los
     traducen pese a la instrucción); se emparejan por empresa"""

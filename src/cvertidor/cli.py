@@ -115,6 +115,13 @@ def cmd_run(args: argparse.Namespace) -> int:
           f"{result.sync.unchanged} sin cambios (embeddings: {result.embeddings_model})")
     print(f"Recuperados para la oferta: {len(result.retrieved_docs)} "
           f"en {result.retrieval_attempts} intento{'s' if result.retrieval_attempts != 1 else ''}")
+    verdict = result.verdict
+    labels = {"approved": "aprobado", "rejected": "rechazado", "uncertain": "sin evaluar"}
+    sources = {"checks": "chequeos", "decision_model": "modelo de decisión", "judge": "juez", "none": "ninguno"}
+    scores = ", ".join(f"{name} {value:.2f}" for name, value in verdict.scores.items())
+    print(f"Validación: {labels[verdict.status]} por {sources[verdict.source]} "
+          f"en {result.generation_attempts} intento{'s' if result.generation_attempts != 1 else ''}"
+          f"{f' ({scores})' if scores else ''}")
     for m in result.metrics:
         tokens = f", {m.input_tokens} -> {m.output_tokens} tokens" if m.input_tokens is not None else ""
         model = f", {m.model}" if m.model else ""
@@ -129,7 +136,13 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_check_models(args: argparse.Namespace) -> int:
-    from cvertidor.llm.check import check_embeddings, check_roles, format_report, roles_without_working_model
+    from cvertidor.llm.check import (
+        check_decision_model,
+        check_embeddings,
+        check_roles,
+        format_report,
+        roles_without_working_model,
+    )
     from cvertidor.llm.providers import ModelConfigError
 
     print("Probando modelos configurados (una llamada mínima por modelo)...\n")
@@ -141,6 +154,7 @@ def cmd_check_models(args: argparse.Namespace) -> int:
 
     if not args.sin_embeddings:
         results.append(check_embeddings())
+        results.append(check_decision_model())
     print(format_report(results))
 
     broken = roles_without_working_model(results)
