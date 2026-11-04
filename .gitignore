@@ -1,0 +1,20 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Environment (seguridad: nunca commitear credenciales)
+.env
+*.local
+
+# Artifacts de RAG / cache
+data/
+*.log
+.ipynb_checkpoints/
+.DS_Store
