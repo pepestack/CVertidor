@@ -6,6 +6,7 @@ los reintentos y los caminos alternativos.
 
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from cvertidor.config import Settings
-from cvertidor.ingestion.pii import MaskResult, mask_pii, unmask
+from cvertidor.ingestion.pii import MaskResult, mask_pii, scrub_pii, unmask
 from cvertidor.llm.providers import StructuredOutputError, get_structured_model
 from cvertidor.prompts.generation import GENERATION_PROMPT
 from cvertidor.prompts.parsing import PARSING_PROMPT
@@ -24,6 +25,7 @@ MIN_JOB_DESC_LENGTH = 30        # Largo minimo de oferta de trabajo
 
 # Datos de contacto: se restauran desde los marcadores y deben existir en el CV original
 CONTACT_FIELDS = ("email", "phone", "linkedin_url", "portfolio_url")
+CANDIDATE_TOKEN = "[CANDIDATO_1]"
 
 
 class InputError(ValueError):
@@ -57,11 +59,11 @@ def _compact(value: str) -> str:
     return re.sub(r"[\s()./:-]", "", value).lower()
 
 
-def unmask_model(model: BaseModel, mapping: dict[str, str]) -> BaseModel:
-    """Restaura los marcadores de PII en todos los campos de texto del modelo"""
+def _map_strings(model: BaseModel, fn: Callable[[str], str]) -> BaseModel:
+    """Aplica `fn` a todos los campos de texto del modelo"""
     def walk(value: Any) -> Any:
         if isinstance(value, str):
-            return unmask(value, mapping)
+            return fn(value)
         if isinstance(value, list):
             return [walk(v) for v in value]
         if isinstance(value, dict):
@@ -69,6 +71,21 @@ def unmask_model(model: BaseModel, mapping: dict[str, str]) -> BaseModel:
         return value
 
     return type(model).model_validate(walk(model.model_dump()))
+
+
+def unmask_model(model: BaseModel, mapping: dict[str, str]) -> BaseModel:
+    """Restaura los marcadores de PII en todos los campos de texto del modelo"""
+    return _map_strings(model, lambda value: unmask(value, mapping))
+
+
+def mask_cv(cv: StandardCV) -> tuple[StandardCV, dict[str, str]]:
+    """Copia del CV sin datos personales, con una sola numeración de marcadores. Es lo único
+    que se indexa o se envía a los modelos después de la extracción. Es determinista: el
+    mismo CV produce los mismos marcadores, así que no hay que guardar el mapeo"""
+    mapping: dict[str, str] = {}
+    masked = _map_strings(cv, lambda value: mask_pii(value, mapping).text.replace(cv.candidate_name, CANDIDATE_TOKEN))
+    mapping[CANDIDATE_TOKEN] = cv.candidate_name
+    return masked, mapping
 
 
 def restore_contact(parsed: StandardCV, masked: MaskResult, original_text: str) -> tuple[StandardCV, list[str]]:
@@ -125,9 +142,11 @@ def generate_adapted_cv(
     chain = GENERATION_PROMPT | get_structured_model("generator", StandardCV, include_raw=True, settings=settings)
     adapted, raw = invoke_structured(
         chain,
-        {"context": context, "job_description": mask_pii(job_text).text, "plan": plan or "- Sin instrucciones adicionales."},
+        {"context": context, "job_description": scrub_pii(job_text), "plan": plan or "- Sin instrucciones adicionales."},
         "StandardCV adaptado",
     )
+    # El contexto va enmascarado: se restauran los marcadores que el modelo haya copiado
+    adapted = unmask_model(adapted, mask_cv(parsed_cv)[1])
     # Nombre y datos de contacto se copian del CV original, no del modelo
     adapted.candidate_name = parsed_cv.candidate_name
     adapted.location = parsed_cv.location

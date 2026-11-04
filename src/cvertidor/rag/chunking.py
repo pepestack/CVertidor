@@ -22,8 +22,9 @@ def make_doc_id(collection_name: str, doc: Document) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
 
 
-def create_cv_documents(parsed_cv: StandardCV) -> list[Document]:
-    candidate_id = make_candidate_id(parsed_cv.candidate_name)
+def create_cv_documents(parsed_cv: StandardCV, candidate_id: str | None = None) -> list[Document]:
+    """`candidate_id` es obligatorio si el CV viene enmascarado (el nombre ya no sirve para derivarlo)"""
+    candidate_id = candidate_id or make_candidate_id(parsed_cv.candidate_name)
     candidate_name = parsed_cv.candidate_name
     documents = []
 

@@ -10,7 +10,7 @@ from langgraph.config import get_store
 from cvertidor.graph.edges import MAX_RETRIEVAL_ATTEMPTS, has_work_history
 from cvertidor.graph.planning import build_plan
 from cvertidor.graph.state import AgentContext, AgentState
-from cvertidor.ingestion.pii import mask_pii
+from cvertidor.ingestion.pii import scrub_pii
 from cvertidor.llm.providers import get_structured_model
 from cvertidor.memory import store as memory
 from cvertidor.observability import anonymize
@@ -18,6 +18,7 @@ from cvertidor.pipeline import (
     GenerationError,
     generate_adapted_cv,
     invoke_structured,
+    mask_cv,
     parse_cv,
     save_outputs,
     step_metrics,
@@ -96,7 +97,8 @@ def index_cv(state: AgentState, ctx: AgentContext) -> dict:
     """Sincroniza los fragmentos en pgvector; sin cambios no se llama al modelo de embeddings"""
     start = time.perf_counter()
     candidate_id = state["candidate_id"]
-    docs = create_cv_documents(state["parsed_cv"])
+    # Se indexa la copia enmascarada: los fragmentos van al modelo de embeddings y al de generación
+    docs = create_cv_documents(mask_cv(state["parsed_cv"])[0], candidate_id)
     info = ctx.embeddings()
     warnings = []
     if info.is_fallback:
@@ -123,7 +125,7 @@ def analyze_job(state: AgentState, ctx: AgentContext) -> dict:
     start = time.perf_counter()
     chain = JOB_ANALYSIS_PROMPT | get_structured_model("job", JobRequirements, include_raw=True, settings=ctx.settings)
     try:
-        job_reqs, raw = invoke_structured(chain, {"job_description": mask_pii(state["job_text"]).text}, "JobRequirements")
+        job_reqs, raw = invoke_structured(chain, {"job_description": scrub_pii(state["job_text"])}, "JobRequirements")
         decision, warnings = "ok", []
         memory.save_job(get_store(), state["job_hash"], job_reqs)
     except GenerationError as error:
@@ -152,7 +154,7 @@ def plan(state: AgentState, ctx: AgentContext) -> dict:
     preferences = memory.load_preferences(store, candidate_id)
     warnings = []
     try:
-        similar = memory.find_similar_generations(store, candidate_id, mask_pii(state["job_text"]).text)
+        similar = memory.find_similar_generations(store, candidate_id, scrub_pii(state["job_text"]))
     except Exception as error:
         # El recuerdo semántico es opcional: si el modelo de embeddings falla, se sigue sin él
         similar = []
@@ -184,7 +186,7 @@ def retrieve(state: AgentState, ctx: AgentContext) -> dict:
     plan y un umbral de similitud más bajo; conserva lo recuperado en intentos anteriores"""
     start = time.perf_counter()
     attempt = state.get("retrieval_attempts", 0)
-    queries = state["plan"].retrieval_queries or [state["job_text"]]
+    queries = state["plan"].retrieval_queries or [scrub_pii(state["job_text"])]
     query = queries[min(attempt, len(queries) - 1)]
 
     info = ctx.embeddings()
@@ -229,7 +231,8 @@ def retrieve(state: AgentState, ctx: AgentContext) -> dict:
 
 def generate(state: AgentState, ctx: AgentContext) -> dict:
     start = time.perf_counter()
-    always_included = [d for d in create_cv_documents(state["parsed_cv"])
+    masked_cv = mask_cv(state["parsed_cv"])[0]
+    always_included = [d for d in create_cv_documents(masked_cv, state["candidate_id"])
                        if d.metadata["section"] in ALWAYS_INCLUDED_SECTIONS]
     context = format_docs(state.get("retrieved_docs", []) + always_included)
     draft, raw = generate_adapted_cv(context, state["job_text"], state["parsed_cv"], ctx.settings,
@@ -257,7 +260,7 @@ def render_and_save(state: AgentState, ctx: AgentContext) -> dict:
 
     warnings = []
     try:
-        memory.save_generation(get_store(), state["candidate_id"], mask_pii(state["job_text"]).text, markdown, {
+        memory.save_generation(get_store(), state["candidate_id"], scrub_pii(state["job_text"]), markdown, {
             "job_title": job_reqs.title,
             "language": lang,
             "skill_coverage": plan_result.skill_coverage,

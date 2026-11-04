@@ -9,6 +9,7 @@ import unicodedata
 
 from pydantic import BaseModel, Field
 
+from cvertidor.ingestion.pii import scrub_pii
 from cvertidor.schemas.cv import StandardCV
 from cvertidor.schemas.job import JobRequirements
 
@@ -108,7 +109,8 @@ def build_plan(
     low_coverage = coverage is not None and coverage < LOW_COVERAGE
     priority = list(LOW_COVERAGE_PRIORITY if low_coverage else DEFAULT_PRIORITY)
 
-    queries = [job_text]
+    # Las consultas se envían al modelo de embeddings
+    queries = [scrub_pii(job_text)]
     focus = job.must_have or job.nice_to_have
     if focus:
         queries.append(f"{job.title or 'Cargo'}: experiencia con {', '.join(focus)}")

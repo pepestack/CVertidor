@@ -9,7 +9,7 @@ from langchain_core.runnables import RunnableLambda
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 
-from cvertidor import cli
+from cvertidor import cli, pipeline
 from cvertidor.graph import builder, edges, nodes, runner
 from cvertidor.llm.embeddings import EmbeddingsInfo
 from cvertidor.pipeline import GenerationError
@@ -202,6 +202,43 @@ def test_memoria_evita_llamadas_a_modelos_y_el_hilo_conserva_su_estado(fake_worl
     assert calls["parse"] == 4 and calls["job"] == 2
     assert result.preferences == ["omitir intereses"]
     assert "omitir intereses" in calls["generate_plan"]
+
+
+def test_ningun_dato_personal_llega_a_los_modelos(fake_world, monkeypatch, sample_cv):
+    cv = sample_cv.model_copy(deep=True)
+    private = [cv.email, cv.phone, cv.linkedin_url, cv.candidate_name]
+    cv.work_history[0].responsibilities.append(f"Coordinó con {cv.candidate_name}: {cv.email}, {cv.phone}, {cv.linkedin_url}")
+    monkeypatch.setattr(nodes, "parse_cv", lambda text, settings: (cv.model_copy(deep=True), [], ai()))
+
+    indexed = []
+    monkeypatch.setattr(nodes, "sync_candidate_docs", lambda store, url, cid, docs: indexed.extend(docs) or SyncStats(1, 0, 0))
+
+    # El generador real, con un modelo falso que copia un marcador en su respuesta
+    prompts = []
+    email_token = next(t for t, v in pipeline.mask_cv(cv)[1].items() if v == cv.email)
+
+    def fake_model(*args, **kwargs):
+        def run(prompt):
+            prompts.append(prompt.to_string())
+            adapted = cv.model_copy(update={"professional_summary": f"Contacto: {email_token}"})
+            return {"parsed": adapted, "raw": ai(), "parsing_error": None}
+        return RunnableLambda(run)
+
+    monkeypatch.setattr(pipeline, "get_structured_model", fake_model)
+    monkeypatch.setattr(nodes, "generate_adapted_cv", pipeline.generate_adapted_cv)
+
+    result = fake_world["run"](JOB_ES + " Postular a reclutadora@banco.cl o al +56 9 8765 4321.")
+
+    sent = [*(d.page_content for d in indexed), *(q for q, _ in fake_world["calls"]["retriever"]), *prompts]
+    assert indexed and prompts
+    for value in [*private, "reclutadora@banco.cl", "+56 9 8765 4321"]:
+        assert not any(value in text for text in sent), value
+    # Los marcadores de la oferta no se pueden confundir con los del CV
+    assert "[DATO_OCULTO]" in prompts[0]
+    # El CV final tiene los datos reales, incluido el marcador que copió el modelo
+    assert result.adapted_cv.professional_summary == f"Contacto: {cv.email}"
+    assert result.adapted_cv.candidate_name == cv.candidate_name
+    assert all(d.metadata["candidate_id"] == result.candidate_id for d in indexed)
 
 
 def test_error_en_un_nodo_queda_auditado(fake_world, monkeypatch):

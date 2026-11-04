@@ -22,7 +22,9 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
     ("TELEFONO", re.compile(r"(?<![\w-])\+?\(?\d[\d\s().-]{7,}\d(?![\w-])")),
 ]
 
-PLACEHOLDER_RE = re.compile(r"\[(EMAIL|URL|RUT|TELEFONO)_\d+\]")
+PLACEHOLDER_RE = re.compile(r"\[(EMAIL|URL|RUT|TELEFONO|CANDIDATO)_\d+\]")
+# Marcador de los datos de una oferta: no se restauran y no pueden confundirse con los del CV
+HIDDEN_DATA = "[DATO_OCULTO]"
 YEAR_RANGE_RE = re.compile(r"\b(?:19|20)\d{2}\s*[-–]\s*(?:19|20)\d{2}\b")
 # Puntuación que suele quedar pegada al final de una URL o correo dentro de una frase
 TRAILING_PUNCTUATION = ".,;:)]}"
@@ -42,11 +44,15 @@ def _digits(value: str) -> int:
     return sum(c.isdigit() for c in value)
 
 
-def mask_pii(text: str) -> MaskResult:
-    """Reemplaza datos personales por marcadores; el mismo valor recibe siempre el mismo marcador"""
-    mapping: dict[str, str] = {}
-    reverse: dict[str, str] = {}
+def mask_pii(text: str, mapping: dict[str, str] | None = None) -> MaskResult:
+    """Reemplaza datos personales por marcadores; el mismo valor recibe siempre el mismo marcador.
+    Con `mapping` la numeración se comparte entre varias llamadas (y el diccionario se actualiza)"""
+    mapping = {} if mapping is None else mapping
+    reverse = {value: token for token, value in mapping.items()}
     counters: dict[str, int] = {}
+    for token in mapping:
+        kind = token[1:].split("_")[0]
+        counters[kind] = counters.get(kind, 0) + 1
 
     def placeholder_for(kind: str, value: str) -> str:
         if value not in reverse:
@@ -74,6 +80,11 @@ def mask_pii(text: str) -> MaskResult:
         text = pattern.sub(replace, text)
 
     return MaskResult(text, mapping)
+
+
+def scrub_pii(text: str) -> str:
+    """Oculta los datos personales de un texto cuyo original no hay que restaurar (una oferta)"""
+    return PLACEHOLDER_RE.sub(HIDDEN_DATA, mask_pii(text).text)
 
 
 def unmask(value: str | None, mapping: dict[str, str]) -> str | None:
