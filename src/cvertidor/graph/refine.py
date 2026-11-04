@@ -65,7 +65,7 @@ def refine_agent(state: AgentState, ctx: AgentContext) -> dict:
         job_title=job.title or "sin título",
         requirements=", ".join(job.must_have) or "sin requisitos",
         summary=compacted.get("conversation_summary") or state.get("conversation_summary") or NO_SUMMARY,
-        draft=review_markdown(state["draft_cv"], state["plan"].output_language),
+        draft=review_markdown(state["draft_cv"], state["plan"].output_language, state["parsed_cv"]),
     ))
     response = model.invoke([system, *recent])
 

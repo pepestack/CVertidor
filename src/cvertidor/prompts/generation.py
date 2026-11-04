@@ -1,6 +1,6 @@
 """Prompt de generación del CV adaptado a la oferta: el del notebook más el plan del
 nodo `plan` (idioma de salida y prioridades), el recordatorio final de extensión y, si una
-persona pidió cambios, el borrador actual para editarlo en vez de reescribirlo."""
+persona o la validación pidieron cambios, el borrador actual para editarlo en vez de reescribirlo."""
 
 from langchain_core.prompts import ChatPromptTemplate
 
@@ -67,3 +67,13 @@ BORRADOR ACTUAL:
 </current_draft>
 
 Edita <current_draft> aplicando todas las correcciones confirmadas por el candidato. Conserva sin cambios todo lo demás: mismo texto, mismas secciones y mismo orden."""
+
+# Bloque que se agrega al final del mensaje cuando la validación rechazó el intento anterior
+VALIDATION_REVISION_BLOCK = """
+
+BORRADOR RECHAZADO:
+<current_draft>
+{draft}
+</current_draft>
+
+Edita <current_draft> resolviendo únicamente las correcciones obligatorias indicadas en <plan>. Conserva sin cambios todo lo demás y usa solo <candidate_context> como fuente de datos."""

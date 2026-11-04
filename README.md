@@ -141,7 +141,7 @@ El nodo `plan` es determinista: no usa un modelo y se puede probar sin red. Deci
 | Menos del 50 % de los requisitos obligatorios en el CV | Pone habilidades y formación antes que la experiencia | [Escenario 4](./docs/evidencia/escenarios.md) |
 | Menos de 2 fragmentos de experiencia relevantes | Reintenta con otra consulta y un umbral 0,05 menor | [Escenario 4](./docs/evidencia/escenarios.md) |
 | El modelo omite toda la experiencia | Restaura empresa, cargo y fechas por código, y avisa | [Escenario 4](./docs/evidencia/escenarios.md) |
-| Datos fuera del CV original | Rechaza y corrige, hasta 3 intentos | Pruebas de `tests/test_graph.py` |
+| Datos fuera del CV original | Rechaza y edita el borrador rechazado, hasta 3 intentos | Pruebas de `tests/test_graph.py` |
 | Un reintento repite el mismo borrador | Deja de reintentar | Pruebas de `tests/test_graph.py` |
 | Resultado dudoso o modelo de decisión no disponible | Consulta al juez | Pruebas de `tests/test_graph.py` |
 | Sin aprobación automática | Pregunta a una persona, incluso con `--auto` | [Escenario 6](./docs/evidencia/escenarios.md) |

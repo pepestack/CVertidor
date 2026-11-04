@@ -88,6 +88,28 @@ def test_generate_conserva_los_cargos_originales(monkeypatch, make_settings, sam
     assert result.work_history[1].role == "CTO"
 
 
+def test_reintento_de_validacion_edita_el_borrador_y_conserva_los_cargos(monkeypatch, make_settings, sample_cv):
+    from cvertidor.schemas.cv import WorkExperience
+
+    seen = {}
+    translated = StandardCV(candidate_name="x", work_history=[
+        WorkExperience(company="Grupo Financiero e Inversiones del Pacífico S.A.", role="Data Process Controller"),
+    ])
+
+    def fake_model(*args, **kwargs):
+        def run(prompt_value):
+            seen["prompt"] = prompt_value.to_string()
+            return {"parsed": translated, "raw": AIMessage(content=""), "parsing_error": None}
+        return RunnableLambda(run)
+
+    monkeypatch.setattr(pipeline, "get_structured_model", fake_model)
+
+    result, _ = pipeline.generate_adapted_cv("contexto", "oferta", sample_cv, make_settings(), current_draft="BORRADOR")
+
+    assert "BORRADOR RECHAZADO" in seen["prompt"] and "correcciones obligatorias" in seen["prompt"]
+    assert result.work_history[0].role == "Data Engineer & Controller de Procesos de Datos"
+
+
 def test_generate_sin_salida_valida_da_error(monkeypatch, make_settings):
     raw = AIMessage(content="", response_metadata={"finish_reason": "length"})
     monkeypatch.setattr(pipeline, "get_structured_model",

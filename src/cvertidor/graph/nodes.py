@@ -272,10 +272,13 @@ def generate(state: AgentState, ctx: AgentContext) -> dict:
         plan_text += f"\n- Correcciones obligatorias del intento anterior:\n{verdict.feedback}"
 
     attempts = state.get("generation_attempts", 0) + 1
-    # Con correcciones de una persona se edita el borrador que revisó, en vez de reescribirlo
-    current_draft = review_markdown(state["draft_cv"], state["plan"].output_language) if corrections else None
+    # Con correcciones de una persona o de la validación se edita el borrador, en vez de reescribirlo.
+    # `plan` y `edit_cv` reinician el veredicto: el borrador de una ejecución anterior no llega aquí
+    current_draft = None
+    if corrections or (verdict and verdict.feedback):
+        current_draft = review_markdown(state["draft_cv"], state["plan"].output_language, state["parsed_cv"])
     draft, raw = generate_adapted_cv(context, state["job_text"], state["parsed_cv"], ctx.settings,
-                                     plan=plan_text, current_draft=current_draft)
+                                     plan=plan_text, current_draft=current_draft, human_edit=bool(corrections))
     metrics = step_metrics("generate" if attempts == 1 else f"generate{attempts}", start, raw)
     warnings = []
     if not corrections and restore_missing_work_history(draft, state["parsed_cv"]):
@@ -302,9 +305,11 @@ def generate(state: AgentState, ctx: AgentContext) -> dict:
     }
 
 
-def review_markdown(draft: StandardCV, lang: str) -> str:
-    """El CV tal como lo ven los evaluadores: enmascarado y sin datos de contacto (no se evalúan)"""
-    masked = mask_cv(draft)[0].model_copy(update={
+def review_markdown(draft: StandardCV, lang: str, source: StandardCV | None = None) -> str:
+    """El CV tal como lo ven los evaluadores: enmascarado y sin datos de contacto (no se evalúan).
+    Con `source` usa los marcadores de ese CV: los del contexto y los que se restauran después"""
+    mapping = mask_cv(source)[1] if source else None
+    masked = mask_cv(draft, mapping)[0].model_copy(update={
         "email": None, "phone": None, "location": None, "linkedin_url": None, "portfolio_url": None,
     })
     return cv_to_markdown(masked, lang=lang)
@@ -325,7 +330,8 @@ def validate(state: AgentState, ctx: AgentContext) -> dict:
     else:
         try:
             result = evaluate_draft(state["context"], state["job_reqs"].must_have,
-                                    review_markdown(state["draft_cv"], plan_result.output_language), ctx.settings)
+                                    review_markdown(state["draft_cv"], plan_result.output_language, state["parsed_cv"]),
+                                    ctx.settings)
             decision_model = result.model
             status = status_from_scores(result.scores, human_corrected=bool(corrections))
             flagged = [b["feedback"] for name, b in BEHAVIORS.items()
@@ -360,7 +366,7 @@ def judge(state: AgentState, ctx: AgentContext) -> dict:
         review, raw = invoke_structured(chain, {
             "context": state["context"],
             "requirements": ", ".join(state["job_reqs"].must_have) or "sin requisitos",
-            "adapted_cv": review_markdown(state["draft_cv"], state["plan"].output_language),
+            "adapted_cv": review_markdown(state["draft_cv"], state["plan"].output_language, state["parsed_cv"]),
         }, "JudgeReview")
         status = "approved" if review.approved else "rejected"
         feedback = None
@@ -475,6 +481,7 @@ def render_and_save(state: AgentState, ctx: AgentContext) -> dict:
             "verdict_scores": state["verdict"].scores,
             "human_decision": state.get("human_decision"),
             "human_corrections": len(corrections),
+            "generation_attempts": state.get("generation_attempts", 0),
             "files": [str(p) for p in paths],
             "thread_id": ctx.thread_id,
         })

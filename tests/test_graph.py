@@ -85,8 +85,9 @@ def fake_world(monkeypatch, make_settings, sample_cv, tmp_path):
 
     monkeypatch.setattr(nodes, "build_retriever", fake_retriever)
 
-    def fake_generate(context, job_text, parsed_cv, settings, plan="", current_draft=None):
+    def fake_generate(context, job_text, parsed_cv, settings, plan="", current_draft=None, human_edit=False):
         calls["current_draft"] = current_draft
+        calls.setdefault("drafts", []).append((current_draft, human_edit))
         calls["generate_plan"] = plan
         calls["generate"] += 1
         calls["context"] = context
@@ -135,6 +136,8 @@ def test_flujo_completo_con_experiencia_relevante(fake_world):
     assert "Idioma de salida: español." in fake_world["calls"]["generate_plan"]
     assert "--- Chunk (education) ---" in fake_world["calls"]["context"]
     assert [m.step for m in result.metrics].count("generate") == 1
+    record = fake_world["store"].search(("generations", result.candidate_id))[0].value
+    assert record["generation_attempts"] == 1
 
 
 def test_sin_experiencia_reintenta_con_consultas_mas_amplias(fake_world):
@@ -279,14 +282,37 @@ def test_rechazo_corrige_con_retroalimentacion_hasta_tres_intentos(fake_world):
     assert "Correcciones obligatorias" in fake_world["calls"]["generate_plan"]
     assert (pending.kind, pending.status) == ("escalation", "rejected")
     assert fake_world["calls"]["judge"] == 0
+    # El primer intento escribe desde cero; los reintentos editan el borrador rechazado
+    first, *retries = fake_world["calls"]["drafts"]
+    assert first == (None, False)
+    assert len(retries) == 2
+    assert all("## Experiencia Laboral" in draft and not human_edit for draft, human_edit in retries)
 
     # Un reintento que devuelve el mismo borrador corta el bucle: repetirlo solo gastaría tokens
     fake_world["calls"].update(generate=0, same_draft=True)
     assert fake_world["run"]().attempts == 2
 
 
+def test_borrador_conserva_los_marcadores_del_cv_original():
+    from cvertidor.ingestion.pii import unmask
+    from cvertidor.schemas.cv import StandardCV, WorkExperience
+
+    url_a, url_b = "https://a.example.com/x", "https://b.example.com/y"
+    def cv(*urls):
+        return StandardCV(candidate_name="Ana Pérez", work_history=[
+            WorkExperience(company="C", role="R", responsibilities=[f"Proyecto {u}" for u in urls])])
+
+    source, draft = cv(url_a, url_b), cv(url_b)  # el borrador omitió la primera URL
+
+    masked = nodes.review_markdown(draft, "es", source)
+
+    assert url_b not in masked
+    restored = unmask(masked, pipeline.mask_cv(source)[1])
+    assert url_b in restored and url_a not in restored
+
+
 def test_experiencia_omitida_se_restaura_sin_gastar_otro_intento(fake_world, monkeypatch):
-    def without_roles(context, job_text, parsed_cv, settings, plan="", current_draft=None):
+    def without_roles(context, job_text, parsed_cv, settings, plan="", current_draft=None, human_edit=False):
         return parsed_cv.model_copy(update={"work_history": []}, deep=True), ai()
 
     monkeypatch.setattr(nodes, "generate_adapted_cv", without_roles)
@@ -352,7 +378,7 @@ def test_revision_humana_pausa_y_se_retoma(fake_world):
 def test_correcciones_se_acumulan_editan_el_borrador_y_pueden_agregar_datos(fake_world, monkeypatch):
     calls = fake_world["calls"]
 
-    def fake_edit(context, job_text, parsed_cv, settings, plan="", current_draft=None):
+    def fake_edit(context, job_text, parsed_cv, settings, plan="", current_draft=None, human_edit=False):
         calls.update(context=context, current_draft=current_draft)
         draft = parsed_cv.model_copy(deep=True)
         if "Claude Code" in context:

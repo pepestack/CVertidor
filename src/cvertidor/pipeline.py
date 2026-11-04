@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from cvertidor.config import Settings
 from cvertidor.ingestion.pii import MaskResult, mask_pii, scrub_pii, unmask
 from cvertidor.llm.providers import StructuredOutputError, get_structured_model
-from cvertidor.prompts.generation import GENERATION_PROMPT, REVISION_BLOCK
+from cvertidor.prompts.generation import GENERATION_PROMPT, REVISION_BLOCK, VALIDATION_REVISION_BLOCK
 from cvertidor.prompts.parsing import PARSING_PROMPT
 from cvertidor.schemas.cv import StandardCV
 
@@ -79,12 +79,13 @@ def unmask_model(model: BaseModel, mapping: dict[str, str]) -> BaseModel:
     return _map_strings(model, lambda value: unmask(value, mapping))
 
 
-def mask_cv(cv: StandardCV) -> tuple[StandardCV, dict[str, str]]:
+def mask_cv(cv: StandardCV, mapping: dict[str, str] | None = None) -> tuple[StandardCV, dict[str, str]]:
     """Copia del CV sin datos personales, con una sola numeración de marcadores. Es lo único
     que se indexa o se envía a los modelos después de la extracción. Es determinista: el
-    mismo CV produce los mismos marcadores, así que no hay que guardar el mapeo"""
-    mapping: dict[str, str] = {}
-    masked = _map_strings(cv, lambda value: mask_pii(value, mapping).text.replace(cv.candidate_name, CANDIDATE_TOKEN))
+    mismo CV produce los mismos marcadores, así que no hay que guardar el mapeo.
+    Con `mapping` (el del CV original) un borrador conserva los marcadores de ese CV"""
+    mapping = dict(mapping or {})
+    masked =_map_strings(cv, lambda value: mask_pii(value, mapping).text.replace(cv.candidate_name, CANDIDATE_TOKEN))
     mapping[CANDIDATE_TOKEN] = cv.candidate_name
     return masked, mapping
 
@@ -140,13 +141,16 @@ def generate_adapted_cv(
     settings: Settings,
     plan: str = "",
     current_draft: str | None = None,
+    human_edit: bool = False,
 ) -> tuple[StandardCV, Any]:
-    """Con `current_draft` edita ese borrador según las correcciones de una persona, en vez de reescribir"""
+    """Con `current_draft` edita ese borrador en vez de reescribir: según las correcciones de una
+    persona (`human_edit`) o, si no, según lo que rechazó la validación"""
     chain = GENERATION_PROMPT | get_structured_model("generator", StandardCV, include_raw=True, settings=settings)
+    block = REVISION_BLOCK if human_edit else VALIDATION_REVISION_BLOCK
     adapted, raw = invoke_structured(
         chain,
         {"context": context, "job_description": scrub_pii(job_text), "plan": plan or "- Sin instrucciones adicionales.",
-         "revision": REVISION_BLOCK.format(draft=current_draft) if current_draft else ""},
+         "revision": block.format(draft=current_draft) if current_draft else ""},
         "StandardCV adaptado",
     )
     # El contexto va enmascarado: se restauran los marcadores que el modelo haya copiado
@@ -157,7 +161,7 @@ def generate_adapted_cv(
     for name in CONTACT_FIELDS:
         setattr(adapted, name, getattr(parsed_cv, name))
     # Una persona puede haber pedido cambiar un cargo
-    if not current_draft:
+    if not human_edit:
         restore_roles(adapted, parsed_cv)
     return adapted, raw
 
