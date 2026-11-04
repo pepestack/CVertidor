@@ -20,10 +20,11 @@ def anonymize(value: str) -> str:
 
 
 class AuditLog:
-    def __init__(self, log_dir: Path | None, run_id: str):
+    def __init__(self, log_dir: Path | None, run_id: str, thread_id: str | None = None):
         # log_dir=None desactiva la escritura (ej. en tests que no la necesitan)
         self.path = Path(log_dir) / AUDIT_FILE if log_dir else None
         self.run_id = run_id
+        self.thread_id = thread_id
         self.events: list[dict[str, Any]] = []
         # Los nodos paralelos del grafo pueden registrar al mismo tiempo
         self._lock = threading.Lock()
@@ -32,6 +33,7 @@ class AuditLog:
         event = {
             "ts": datetime.now(UTC).isoformat(timespec="milliseconds"),
             "run_id": self.run_id,
+            "thread_id": self.thread_id,
             "node": node,
             **details,
         }

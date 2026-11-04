@@ -28,6 +28,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--cv", required=True, help="Ruta al CV (.txt, .md, .pdf o .docx)")
     run.add_argument("--job", required=True, help="Ruta a la oferta de trabajo (.txt, .md, .pdf o .docx)")
     run.add_argument("--salida", help="Carpeta de salida (por defecto OUTPUT_DIR o ./output)")
+    run.add_argument("--thread", help="Hilo de conversación: reutilizarlo continúa su estado (por defecto, uno nuevo)")
+    run.add_argument("--reprocesar", action="store_true",
+                     help="Ignora el CV y la oferta guardados en memoria y vuelve a llamar a los modelos")
 
     graph = subparsers.add_parser("graph", help="Exporta el diagrama del grafo de LangGraph en Mermaid")
     graph.add_argument("--salida", help="Archivo .mmd o .md donde guardarlo (por defecto se imprime)")
@@ -66,7 +69,8 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     try:
         cv_text, job_text = load_text(args.cv), load_text(args.job)
-        result = run_agent(cv_text, job_text, settings, on_step=lambda m: print(f"-> {m}"))
+        result = run_agent(cv_text, job_text, settings, on_step=lambda m: print(f"-> {m}"),
+                           thread_id=args.thread, reprocess=args.reprocesar)
     except (DocumentLoadError, InputError, ModelConfigError, GenerationError) as error:
         print(f"Error: {error}")
         return 2
@@ -92,7 +96,14 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 3
 
     plan = result.plan
-    print(f"\nCandidato: {result.parsed_cv.candidate_name} ({result.candidate_id})")
+    print(f"\nHilo: {result.thread_id} (ejecución {result.runs_in_thread})")
+    print(f"Memoria: CV {'reutilizado' if result.cv_from_memory else 'procesado'}, "
+          f"oferta {'reutilizada' if result.job_from_memory else 'analizada'}, "
+          f"{len(result.preferences)} preferencias")
+    for past in result.similar_generations[:1]:
+        score = f", similitud {past['score']:.2f}" if past["score"] is not None else ""
+        print(f"  Generación anterior más parecida: {past['job_title'] or 'sin título'} ({past['created_at']}{score})")
+    print(f"Candidato: {result.parsed_cv.candidate_name} ({result.candidate_id})")
     print(f"Oferta: {result.job_reqs.title or 'sin título'} | "
           f"{len(result.job_reqs.must_have)} requisitos obligatorios, {len(result.job_reqs.nice_to_have)} deseables")
     coverage = f"{plan.skill_coverage:.0%}" if plan.skill_coverage is not None else "sin requisitos"
@@ -104,6 +115,13 @@ def cmd_run(args: argparse.Namespace) -> int:
           f"{result.sync.unchanged} sin cambios (embeddings: {result.embeddings_model})")
     print(f"Recuperados para la oferta: {len(result.retrieved_docs)} "
           f"en {result.retrieval_attempts} intento{'s' if result.retrieval_attempts != 1 else ''}")
+    verdict = result.verdict
+    labels = {"approved": "aprobado", "rejected": "rechazado", "uncertain": "sin evaluar"}
+    sources = {"checks": "chequeos", "decision_model": "modelo de decisión", "judge": "juez", "none": "ninguno"}
+    scores = ", ".join(f"{name} {value:.2f}" for name, value in verdict.scores.items())
+    print(f"Validación: {labels[verdict.status]} por {sources[verdict.source]} "
+          f"en {result.generation_attempts} intento{'s' if result.generation_attempts != 1 else ''}"
+          f"{f' ({scores})' if scores else ''}")
     for m in result.metrics:
         tokens = f", {m.input_tokens} -> {m.output_tokens} tokens" if m.input_tokens is not None else ""
         model = f", {m.model}" if m.model else ""
@@ -118,7 +136,13 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_check_models(args: argparse.Namespace) -> int:
-    from cvertidor.llm.check import check_embeddings, check_roles, format_report, roles_without_working_model
+    from cvertidor.llm.check import (
+        check_decision_model,
+        check_embeddings,
+        check_roles,
+        format_report,
+        roles_without_working_model,
+    )
     from cvertidor.llm.providers import ModelConfigError
 
     print("Probando modelos configurados (una llamada mínima por modelo)...\n")
@@ -130,6 +154,7 @@ def cmd_check_models(args: argparse.Namespace) -> int:
 
     if not args.sin_embeddings:
         results.append(check_embeddings())
+        results.append(check_decision_model())
     print(format_report(results))
 
     broken = roles_without_working_model(results)

@@ -107,6 +107,7 @@ def test_cli_devuelve_error_si_un_rol_no_tiene_modelos(monkeypatch, capsys):
 def test_cli_ok(monkeypatch, capsys):
     monkeypatch.setattr(check, "check_roles", lambda roles: [CheckResult("parser", "a", "structured", True, "ok", 0.1)])
     monkeypatch.setattr(check, "check_embeddings", lambda: CheckResult("embeddings", "e", "embeddings", True, "8 dimensiones", 0.1))
+    monkeypatch.setattr(check, "check_decision_model", lambda: CheckResult("decision", "d", "decisions", False, "sin clave", 0.1))
 
     assert cli.main(["check-models"]) == 0
     assert "Todos los roles tienen al menos un modelo disponible." in capsys.readouterr().out

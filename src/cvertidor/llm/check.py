@@ -147,6 +147,21 @@ def check_embeddings(settings: Settings | None = None) -> CheckResult:
                            f"{describe_error(error)} (se usará MiniLM local)", time.perf_counter() - start)
 
 
+def check_decision_model(settings: Settings | None = None) -> CheckResult:
+    from cvertidor.llm.decisions import DecisionError, evaluate_draft
+
+    settings = settings or get_settings()
+    start = time.perf_counter()
+    try:
+        result = evaluate_draft("Rol: Data Engineer. Responsabilidades: pipelines con Python.", ["Python"],
+                                "Data Engineer con pipelines en Python.", settings)
+        return CheckResult("decision", settings.decision_model, "decisions", True,
+                           f"{len(result.scores)} conductas evaluadas", time.perf_counter() - start)
+    except DecisionError as error:
+        return CheckResult("decision", settings.decision_model, "decisions", False,
+                           f"{str(error)[:160]} (decidirá el juez)", time.perf_counter() - start)
+
+
 def format_report(results: list[CheckResult]) -> str:
     lines = []
     for r in results:
@@ -160,6 +175,7 @@ def roles_without_working_model(results: list[CheckResult]) -> list[str]:
     """Roles de chat en que no responde ningún modelo (ni principal ni fallbacks)"""
     by_role: dict[str, bool] = {}
     for r in results:
-        if r.role != "embeddings":
+        # Embeddings y modelo de decisión tienen su propio respaldo
+        if r.role not in ("embeddings", "decision"):
             by_role[r.role] = by_role.get(r.role, False) or r.ok
     return [role for role, ok in by_role.items() if not ok]

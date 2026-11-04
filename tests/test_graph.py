@@ -1,16 +1,21 @@
 import json
+from contextlib import nullcontext
 
 import pytest
 from langchain_core.documents import Document
 from langchain_core.embeddings import DeterministicFakeEmbedding
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableLambda
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.store.memory import InMemoryStore
 
-from cvertidor import cli
+from cvertidor import cli, pipeline
 from cvertidor.graph import builder, edges, nodes, runner
+from cvertidor.llm.decisions import DecisionError, DecisionResult
 from cvertidor.llm.embeddings import EmbeddingsInfo
 from cvertidor.pipeline import GenerationError
 from cvertidor.rag.vector_store import SyncStats
+from cvertidor.schemas.evaluation import JudgeReview
 from cvertidor.schemas.job import JobRequirements
 
 CV_TEXT = "Sebastián Navarro. Data Engineer con experiencia en Python, SQL y DBT en el sector financiero."
@@ -31,18 +36,38 @@ def ai(model="fake-model"):
 @pytest.fixture
 def fake_world(monkeypatch, make_settings, sample_cv, tmp_path):
     """Grafo completo sin red ni base de datos: modelos, pgvector y recuperador falsos"""
-    calls = {"retriever": [], "generate_plan": None}
+    calls = {"retriever": [], "generate_plan": None, "parse": 0, "job": 0, "judge": 0, "generate": 0, "reviewed": []}
+    decision = {"value": DecisionResult({"inventa_datos": 0.02, "omite_requisitos": 0.01}, "fake-decision")}
+
+    def fake_decision(context, requirements, draft, settings):
+        calls["reviewed"] += [context, draft]
+        if isinstance(decision["value"], Exception):
+            raise decision["value"]
+        return decision["value"]
+
+    monkeypatch.setattr(nodes, "evaluate_draft", fake_decision)
+    judge_review = {"value": JudgeReview(approved=True)}
     retrieval_results = [[*WORK, SKILLS]]
 
     monkeypatch.setattr(runner, "ensure_db_available", lambda url: None)
-    monkeypatch.setattr(nodes, "parse_cv", lambda text, settings: (sample_cv.model_copy(deep=True), [], ai()))
+    # Memoria en RAM en vez de Postgres; misma interfaz y mismo serializador del estado
+    saver, store = InMemorySaver(), InMemoryStore()
+    monkeypatch.setattr(runner, "open_checkpointer", lambda url: nullcontext(saver))
+    monkeypatch.setattr(runner, "open_store", lambda url, info: nullcontext(store))
+
+    def fake_parse(text, settings):
+        calls["parse"] += 1
+        return sample_cv.model_copy(deep=True), [], ai()
+
+    monkeypatch.setattr(nodes, "parse_cv", fake_parse)
     monkeypatch.setattr(nodes, "sync_candidate_docs", lambda *args: SyncStats(27, 0, 0))
 
     job_result = {"value": JobRequirements(title="Data Engineer", must_have=["Python", "SQL"])}
 
     def fake_structured(role, schema, **kwargs):
         def run(_):
-            value = job_result["value"]
+            calls["judge" if role == "escalation" else "job"] += 1
+            value = (judge_review if role == "escalation" else job_result)["value"]
             if isinstance(value, Exception):
                 raise value
             return {"parsed": value, "raw": ai(), "parsing_error": None}
@@ -61,21 +86,26 @@ def fake_world(monkeypatch, make_settings, sample_cv, tmp_path):
 
     def fake_generate(context, job_text, parsed_cv, settings, plan=""):
         calls["generate_plan"] = plan
+        calls["generate"] += 1
         calls["context"] = context
-        return parsed_cv.model_copy(deep=True), ai()
+        draft = parsed_cv.model_copy(deep=True)
+        # Cada intento cambia el borrador, salvo que el test pida lo contrario
+        if not calls.get("same_draft"):
+            draft.interests = [f"Intento {calls['generate']}"]
+        return draft, ai()
 
     monkeypatch.setattr(nodes, "generate_adapted_cv", fake_generate)
 
     settings = make_settings(db_url="postgresql://falsa", output_dir=tmp_path / "out", log_dir=tmp_path / "logs")
     info = EmbeddingsInfo(DeterministicFakeEmbedding(size=8), "google", "google:fake")
 
-    def run(job_text=JOB_ES):
+    def run(job_text=JOB_ES, cv_text=CV_TEXT, **kwargs):
         # Un vector store cualquiera: el recuperador y la sincronización son falsos
-        result = runner.run_agent(CV_TEXT, job_text, settings, embeddings_info=info)
-        return result
+        return runner.run_agent(cv_text, job_text, settings, embeddings_info=info, **kwargs)
 
     return {"run": run, "calls": calls, "retrieval_results": retrieval_results,
-            "job_result": job_result, "settings": settings}
+            "job_result": job_result, "settings": settings, "store": store,
+            "decision": decision, "judge_review": judge_review}
 
 
 @pytest.fixture(autouse=True)
@@ -124,7 +154,7 @@ def test_agota_los_intentos_y_genera_con_aviso(fake_world):
 
     assert result.retrieval_attempts == edges.MAX_RETRIEVAL_ATTEMPTS
     assert any("Ninguna experiencia laboral" in w for w in result.warnings)
-    assert result.audit_events[-3]["decision"] == "generar_sin_experiencia"
+    assert next(e for e in result.audit_events if e.get("decision") == "generar_sin_experiencia")
 
 
 def test_oferta_en_ingles_genera_en_ingles(fake_world):
@@ -154,13 +184,129 @@ def test_auditoria_un_evento_por_nodo_sin_datos_personales(fake_world, sample_cv
     log = fake_world["settings"].log_dir / "audit.jsonl"
     events = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
     assert sorted(e["node"] for e in events) == sorted(
-        ["ingest_cv", "analyze_job", "plan", "retrieve", "generate", "render_and_save"])
+        ["load_memory", "ingest_cv", "index_cv", "analyze_job", "plan", "retrieve", "generate", "validate", "render_and_save"])
     assert {e["run_id"] for e in events} == {result.run_id}
     assert all(e["status"] == "ok" for e in events)
 
     text = log.read_text(encoding="utf-8")
     for personal in (sample_cv.candidate_name, sample_cv.email, sample_cv.phone, result.candidate_id):
         assert personal not in text
+
+
+def test_memoria_evita_llamadas_a_modelos_y_el_hilo_conserva_su_estado(fake_world):
+    calls = fake_world["calls"]
+    first = fake_world["run"](thread_id="demo")
+    assert (first.cv_from_memory, first.job_from_memory, first.runs_in_thread) == (False, False, 1)
+    assert (calls["parse"], calls["job"]) == (1, 1)
+
+    # Mismo CV, misma oferta y mismo hilo: sin llamadas de extracción, el estado continúa
+    # y las métricas son solo de esta ejecución (el estado se recarga desde el checkpoint)
+    second = fake_world["run"](thread_id="demo")
+    assert (second.cv_from_memory, second.job_from_memory, second.runs_in_thread) == (True, True, 2)
+    assert (calls["parse"], calls["job"]) == (1, 1)
+    assert second.parsed_cv == first.parsed_cv and second.job_reqs == first.job_reqs
+    assert [m.step for m in second.metrics].count("generate") == 1
+    assert len(second.similar_generations) == 1
+
+    # Un CV editado se vuelve a procesar, y luego el anterior ya no cuenta como vigente
+    assert not fake_world["run"](cv_text=CV_TEXT + " Editado.").cv_from_memory
+    assert calls["parse"] == 2
+    assert not fake_world["run"]().cv_from_memory
+    assert calls["parse"] == 3
+
+    # --reprocesar ignora la memoria; las preferencias guardadas llegan al plan
+    fake_world["store"].put(("preferences", first.candidate_id), "p1", {"text": "omitir intereses"})
+    result = fake_world["run"](reprocess=True)
+    assert calls["parse"] == 4 and calls["job"] == 2
+    assert result.preferences == ["omitir intereses"]
+    assert "omitir intereses" in calls["generate_plan"]
+
+
+def test_ningun_dato_personal_llega_a_los_modelos(fake_world, monkeypatch, sample_cv):
+    cv = sample_cv.model_copy(deep=True)
+    private = [cv.email, cv.phone, cv.linkedin_url, cv.candidate_name]
+    cv.work_history[0].responsibilities.append(f"Coordinó con {cv.candidate_name}: {cv.email}, {cv.phone}, {cv.linkedin_url}")
+    monkeypatch.setattr(nodes, "parse_cv", lambda text, settings: (cv.model_copy(deep=True), [], ai()))
+
+    indexed = []
+    monkeypatch.setattr(nodes, "sync_candidate_docs", lambda store, url, cid, docs: indexed.extend(docs) or SyncStats(1, 0, 0))
+
+    # El generador real, con un modelo falso que copia un marcador en su respuesta
+    prompts = []
+    email_token = next(t for t, v in pipeline.mask_cv(cv)[1].items() if v == cv.email)
+
+    def fake_model(*args, **kwargs):
+        def run(prompt):
+            prompts.append(prompt.to_string())
+            adapted = cv.model_copy(update={"professional_summary": f"Contacto: {email_token}"})
+            return {"parsed": adapted, "raw": ai(), "parsing_error": None}
+        return RunnableLambda(run)
+
+    monkeypatch.setattr(pipeline, "get_structured_model", fake_model)
+    monkeypatch.setattr(nodes, "generate_adapted_cv", pipeline.generate_adapted_cv)
+
+    result = fake_world["run"](JOB_ES + " Postular a reclutadora@banco.cl o al +56 9 8765 4321.")
+
+    sent = [*(d.page_content for d in indexed), *(q for q, _ in fake_world["calls"]["retriever"]), *prompts,
+            *fake_world["calls"]["reviewed"]]
+    assert indexed and prompts
+    for value in [*private, "reclutadora@banco.cl", "+56 9 8765 4321"]:
+        assert not any(value in text for text in sent), value
+    # Los marcadores de la oferta no se pueden confundir con los del CV
+    assert "[DATO_OCULTO]" in prompts[0]
+    # El CV final tiene los datos reales, incluido el marcador que copió el modelo
+    assert result.adapted_cv.professional_summary == f"Contacto: {cv.email}"
+    assert result.adapted_cv.candidate_name == cv.candidate_name
+    assert all(d.metadata["candidate_id"] == result.candidate_id for d in indexed)
+
+
+def test_rechazo_corrige_con_retroalimentacion_hasta_tres_intentos(fake_world):
+    fake_world["decision"]["value"] = DecisionResult({"inventa_datos": 0.96, "omite_requisitos": 0.01})
+
+    result = fake_world["run"]()
+
+    assert fake_world["calls"]["generate"] == result.generation_attempts == 3
+    assert "Correcciones obligatorias" in fake_world["calls"]["generate_plan"]
+    assert result.verdict.status == "rejected" and result.output_paths
+    assert any("sin aprobarse tras 3 intentos" in w for w in result.warnings)
+    assert fake_world["calls"]["judge"] == 0
+
+    # Un reintento que devuelve el mismo borrador corta el bucle: repetirlo solo gastaría tokens
+    fake_world["calls"].update(generate=0, same_draft=True)
+    assert fake_world["run"]().generation_attempts == 2
+
+
+def test_experiencia_omitida_se_restaura_sin_gastar_otro_intento(fake_world, monkeypatch):
+    def without_roles(context, job_text, parsed_cv, settings, plan=""):
+        return parsed_cv.model_copy(update={"work_history": []}, deep=True), ai()
+
+    monkeypatch.setattr(nodes, "generate_adapted_cv", without_roles)
+    result = fake_world["run"]()
+
+    assert result.generation_attempts == 1
+    assert [w.company for w in result.adapted_cv.work_history] == [w.company for w in result.parsed_cv.work_history]
+    assert all(w.responsibilities == [] for w in result.adapted_cv.work_history)
+    assert any("omitió toda la experiencia" in w for w in result.warnings)
+
+
+def test_dudoso_o_sin_modelo_de_decision_decide_el_juez(fake_world):
+    fake_world["decision"]["value"] = DecisionResult({"inventa_datos": 0.4, "omite_requisitos": 0.01})
+    result = fake_world["run"]()
+    assert fake_world["calls"]["judge"] == 1
+    assert (result.verdict.status, result.verdict.source, result.generation_attempts) == ("approved", "judge", 1)
+
+    # Sin modelo de decisión, y además el juez rechaza una vez: se corrige con su retroalimentación
+    fake_world["decision"]["value"] = DecisionError("sin clave")
+    fake_world["judge_review"]["value"] = JudgeReview(approved=False, feedback="Quita la cifra inventada.")
+    result = fake_world["run"]()
+    assert "Quita la cifra inventada." in fake_world["calls"]["generate_plan"]
+    assert result.generation_attempts == 3
+
+    # Si tampoco responde el juez, el CV se guarda con un aviso claro y sin reintentar
+    fake_world["judge_review"]["value"] = ConnectionError("caído")
+    result = fake_world["run"]()
+    assert (result.verdict.status, result.generation_attempts) == ("uncertain", 1)
+    assert any("Nadie pudo evaluar" in w for w in result.warnings)
 
 
 def test_error_en_un_nodo_queda_auditado(fake_world, monkeypatch):
@@ -186,12 +332,12 @@ def test_ruta_despues_de_recuperar(docs, attempts, expected):
 
 def test_diagrama_mermaid():
     mermaid = builder.graph_mermaid()
-    for node in ("ingest_cv", "analyze_job", "plan", "retrieve", "generate", "render_and_save"):
+    for node in ("load_memory", "ingest_cv", "index_cv", "analyze_job", "plan", "retrieve", "generate", "validate", "judge", "render_and_save"):
         assert node in mermaid
     # Arista condicional: reintento de la recuperación o paso a la generación
     assert "retrieve -.-> retrieve" in mermaid
     assert "retrieve -.-> generate" in mermaid
-    assert "__start__ --> analyze_job" in mermaid and "__start__ --> ingest_cv" in mermaid
+    assert "load_memory -.-> analyze_job" in mermaid and "load_memory -.-> index_cv" in mermaid
 
 
 def test_cli_graph_guarda_markdown(tmp_path, capsys):
