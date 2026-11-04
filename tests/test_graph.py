@@ -526,6 +526,7 @@ def test_diagrama_mermaid():
     assert "retrieve -.-> retrieve" in mermaid
     assert "retrieve -.-> generate" in mermaid
     assert "load_memory -.-> analyze_job" in mermaid and "load_memory -.-> index_cv" in mermaid
+    assert "refine_agent -.-> plan" not in mermaid and "confirm_preference -.-> plan" not in mermaid
 
 
 def test_cli_graph_guarda_markdown(tmp_path, capsys):

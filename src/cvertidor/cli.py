@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import re
 from pathlib import Path
 
 from cvertidor import __version__
@@ -71,6 +72,7 @@ def _guarded(call):
     """Ejecuta el agente y traduce los errores esperables a un mensaje; devuelve un código de salida si falla"""
     import psycopg
 
+    from cvertidor.config import ConfigError
     from cvertidor.ingestion.loaders import DocumentLoadError
     from cvertidor.llm.check import error_status
     from cvertidor.llm.providers import ModelConfigError
@@ -78,7 +80,7 @@ def _guarded(call):
 
     try:
         return call()
-    except (DocumentLoadError, InputError, ModelConfigError, GenerationError) as error:
+    except (ConfigError, DocumentLoadError, InputError, ModelConfigError, GenerationError) as error:
         print(f"Error: {error}")
         return 2
     except psycopg.OperationalError as error:
@@ -87,7 +89,16 @@ def _guarded(call):
         print(f"Detalle: {str(error).strip()[:200]}")
         return 2
     except Exception as error:
-        if error_status(error) != 429:
+        status = error_status(error)
+        if status in (400, 401, 403) and re.search(r"api.?key|permission|unauthorized|credential", str(error), re.I):
+            print(f"Error: el proveedor rechazó la clave de API ({status}). Revise GOOGLE_API_KEY en .env.")
+            return 2
+        if status in (500, 502, 503, 504):
+            # Todos los modelos de la cadena fallaron por el proveedor, no por el agente
+            print(f"Error: el proveedor de modelos no está disponible ahora ({status}, alta demanda). "
+                  "Reintente en unos minutos; el CV y la oferta ya procesados quedan en memoria y no se repiten.")
+            return 3
+        if status != 429:
             raise
         # Todos los modelos de la cadena respondieron 429
         message = str(error)

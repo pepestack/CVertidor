@@ -124,4 +124,8 @@ def build_graph(checkpointer=None, store=None):
 
 
 def graph_mermaid() -> str:
-    return build_graph().get_graph().draw_mermaid()
+    # Al dibujar, LangGraph agrega aristas hacia el nodo diferido `plan` que no existen en la
+    # definición del grafo ni en ninguna ejecución (la conversación nunca vuelve a planificar)
+    mermaid = build_graph().get_graph().draw_mermaid()
+    return "\n".join(line for line in mermaid.splitlines()
+                     if line.strip() not in ("refine_agent -.-> plan;", "confirm_preference -.-> plan;"))
