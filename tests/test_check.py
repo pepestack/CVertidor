@@ -87,6 +87,34 @@ def test_cli_cuota_de_gemini_agotada(monkeypatch, capsys, tmp_path):
     assert "cuota de la API de Gemini" in capsys.readouterr().out
 
 
+def test_cli_proveedor_saturado_no_muestra_traza(monkeypatch, capsys, tmp_path):
+    from cvertidor.graph import runner
+
+    (tmp_path / "cv.txt").write_text("x" * 60, encoding="utf-8")
+    (tmp_path / "job.txt").write_text("y" * 40, encoding="utf-8")
+
+    def raise_503(*args, **kwargs):
+        raise RuntimeError("503 UNAVAILABLE. This model is currently experiencing high demand.")
+
+    monkeypatch.setattr(runner, "run_agent", raise_503)
+
+    assert cli.main(["run", "--cv", str(tmp_path / "cv.txt"), "--job", str(tmp_path / "job.txt")]) == 3
+    assert "no está disponible ahora (503" in capsys.readouterr().out
+
+
+def test_cli_sin_db_url_da_un_mensaje_claro(entorno_limpio, capsys, tmp_path, monkeypatch):
+    from cvertidor.config import get_settings
+
+    get_settings.cache_clear()
+    monkeypatch.setattr("cvertidor.config.cargar_secretos_colab", lambda: False)
+    (tmp_path / "cv.txt").write_text("x" * 60, encoding="utf-8")
+    (tmp_path / "job.txt").write_text("y" * 40, encoding="utf-8")
+
+    assert cli.main(["run", "--cv", str(tmp_path / "cv.txt"), "--job", str(tmp_path / "job.txt")]) == 2
+    assert "Falta DB_URL" in capsys.readouterr().out
+    get_settings.cache_clear()
+
+
 def test_roles_sin_modelo_disponible():
     results = [
         CheckResult("parser", "a", "structured", False, "", 0),

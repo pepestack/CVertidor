@@ -1,173 +1,246 @@
 # CVertidor
 
-[![Abrir en Google Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/pepestack/CVertidor/blob/master/CVertidor.ipynb)
+[![Abrir en Google Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/pepestack/CVertidor/blob/master/notebooks/CVertidor.ipynb)
 
-CVertidor es una herramienta de inteligencia artificial generativa que adapta un currículum a una oferta de trabajo mediante un flujo de **RAG (Retrieval-Augmented Generation)**. Extrae la información del candidato, la divide en fragmentos, genera embeddings y la almacena en PostgreSQL con `pgvector`. Después recupera los fragmentos más relevantes para generar un CV orientado a la oferta, sin inventar experiencias ni datos.
+CVertidor es un agente que adapta un currículum a una oferta de trabajo sin inventar datos. Extrae el CV, analiza la oferta, planifica la adaptación, recupera la experiencia relevante con búsqueda semántica, genera el CV, lo valida y pide la revisión de una persona antes de guardarlo en Markdown y HTML. Después, se puede conversar con el agente para afinarlo.
 
-El resultado se puede visualizar y guardar en dos formatos:
+**Caso simulado incluido:** un candidato ficticio postula a un cargo de Data Engineer en un banco, a una oferta en inglés y a una oferta ajena a su perfil. Todos los datos de [`samples/`](./samples) son ficticios.
 
-- Markdown (`cv_<candidato>.md`)
-- HTML (`cv_<candidato>.html`)
+Está construido con **LangGraph** y **LangChain**, y guarda todo en **PostgreSQL con pgvector**.
 
-El proyecto está implementado principalmente en el notebook [`CVertidor.ipynb`](./CVertidor.ipynb), por lo que puede ejecutarse en Google Colab o localmente con Jupyter.
+## Inicio rápido
 
-## ¿Por qué usar CVertidor?
-
-- **Adaptación enfocada:** prioriza experiencia, habilidades y certificaciones relacionadas con la oferta.
-- **Trazabilidad del contenido:** el prompt restringe la generación a la información explícita del CV del candidato.
-- **Búsqueda semántica:** usa embeddings y pgvector para recuperar los fragmentos más útiles.
-- **Salida reutilizable:** genera un documento Markdown editable y una versión HTML lista para visualizar.
-- **Fallback de embeddings:** intenta usar embeddings de Google y puede cambiar a `sentence-transformers/all-MiniLM-L6-v2` si el proveedor principal no está disponible.
-- **Validación estructurada:** usa modelos Pydantic para representar experiencia, educación, habilidades y certificaciones.
-
-## Arquitectura del flujo
-
-![Arquitectura del Sistema](./Diagrama.png)
-
-1. Se ingresan el currículum y la oferta de trabajo como texto.
-2. Gemini estructura el currículum en un esquema `StandardCV`.
-3. El contenido se transforma en documentos y fragmentos semánticos.
-4. Los embeddings se guardan en una colección de PostgreSQL/pgvector.
-5. Un recuperador MMR selecciona información relevante para la oferta.
-6. Gemini genera el CV adaptado y lo valida contra el esquema.
-7. El resultado se muestra y se guarda como Markdown y HTML.
-
-> La aplicación y el flujo son locales, pero requieren un proveedor de modelo generativo/embeddings y una base de datos PostgreSQL accesible. No se debe ingresar información sensible real sin evaluar previamente las políticas de privacidad del proveedor utilizado.
-
-## Requisitos previos
-
-- Python 3.10 o superior.
-- Una clave de API de Google con acceso a los modelos Gemini.
-- PostgreSQL con la extensión `pgvector`.
-- Docker Desktop, si se quiere levantar PostgreSQL localmente con el archivo [`compose.yml`](./compose.yml).
-- Jupyter Notebook o Google Colab.
-
-## Instalación y configuración local
-
-### 1. Clonar el repositorio
+Requiere Python 3.11 o superior, [uv](https://docs.astral.sh/uv/), Docker y una [clave de la API de Gemini](https://aistudio.google.com/apikey).
 
 ```bash
 git clone https://github.com/pepestack/CVertidor.git
 cd CVertidor
+uv sync
+cp .env.example .env        # En PowerShell: Copy-Item .env.example .env
 ```
 
-### 2. Crear un entorno virtual e instalar dependencias
-
-En Windows:
-
-```powershell
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-```
-
-En macOS o Linux:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-```
-
-### 3. Crear el archivo de variables de entorno
-
-Copia el archivo de ejemplo:
-
-```powershell
-Copy-Item .env.example .env
-```
-
-Edita `.env` y reemplaza los valores de ejemplo:
-
-```dotenv
-POSTGRES_DB=cvertidor_db
-POSTGRES_USER=admin
-POSTGRES_PASSWORD=una_clave_segura
-DB_URL=postgresql://admin:una_clave_segura@localhost:5432/cvertidor_db
-API_KEY=tu_clave_de_google
-```
-
-`DB_URL` debe ser una URI PostgreSQL válida. En un entorno administrado, como Supabase, usa la URI de conexión proporcionada por el servicio y asegúrate de que `pgvector` esté habilitado.
-
-### 4. Levantar PostgreSQL con pgvector
-
-El repositorio incluye una configuración de Docker Compose que crea la base de datos y activa la extensión `vector` mediante [`init.sql`](./init.sql). Ejecuta este comando después de crear `.env`:
+Edite `.env` y reemplace `GOOGLE_API_KEY`. Luego:
 
 ```bash
 docker compose up -d
+uv run cvertidor check-models
+uv run cvertidor run --cv samples/cv_sebastian_navarro.txt --job samples/oferta_data_engineer_banco.txt --thread demo
 ```
 
-La base de datos queda disponible en `localhost:5432` con los valores definidos en [`.env.example`](./.env.example). Para detenerla:
+El agente muestra el CV y pregunta qué hacer. Al aprobarlo, los archivos quedan en `output/`.
 
-```bash
-docker compose down
+## Arquitectura
+
+```mermaid
+flowchart TD
+    IN["CV y oferta<br/>(txt, md, pdf, docx)"] --> MEM
+
+    subgraph GEN["Generación (cvertidor run)"]
+        MEM["load_memory<br/>¿ya procesó este CV y esta oferta?"]
+        MEM -->|CV nuevo| ING["ingest_cv<br/>extrae el CV"]
+        MEM -->|CV conocido| IDX
+        ING --> IDX["index_cv<br/>sincroniza fragmentos"]
+        MEM -->|oferta nueva| JOB["analyze_job<br/>extrae requisitos"]
+        IDX --> PLAN
+        JOB --> PLAN["plan<br/>idioma, prioridades, consultas"]
+        PLAN --> RET["retrieve<br/>MMR + filtro de similitud"]
+        RET -->|"menos de 2 fragmentos de experiencia<br/>(máx. 3 intentos)"| RET
+        RET --> DRAFT["generate"]
+        DRAFT --> VAL["validate<br/>chequeos y modelo de decisión"]
+        VAL -->|"rechazado<br/>(máx. 3 intentos)"| DRAFT
+        VAL -->|dudoso| JUD["judge<br/>modelo revisor"]
+        JUD -->|rechazado| DRAFT
+    end
+
+    VAL -->|aprobado| REV{{"human_review ⏸"}}
+    JUD -->|aprobado| REV
+    VAL -->|sin resolver| ESC{{"human_escalation ⏸"}}
+    JUD -->|sin resolver| ESC
+    DRAFT -->|"el modelo falla en un reintento<br/>(conserva el borrador)"| ESC
+    REV -->|aprobar| SAVE["render_and_save<br/>Markdown y HTML"]
+    REV -->|corregir| DRAFT
+    ESC -->|aceptar| SAVE
+    ESC -->|corregir, una vez| DRAFT
+    REV -->|descartar| FIN(["Fin"])
+    ESC -->|descartar| FIN
+    SAVE --> FIN
+
+    subgraph CHAT["Conversación (cvertidor chat)"]
+        AG["refine_agent"] <--> TOOLS["Herramientas"]
+        TOOLS -->|preferencia propuesta| CONF{{"confirm_preference ⏸"}}
+        CONF --> AG
+    end
+
+    SAVE -. mismo hilo .-> AG
+
+    subgraph DB["PostgreSQL con pgvector"]
+        PG1[("Fragmentos del CV<br/>enmascarados")]
+        PG2[("Checkpoints por hilo<br/>memoria de corto plazo")]
+        PG3[("Store<br/>memoria de largo plazo")]
+    end
+
+    IDX --> PG1
+    RET --> PG1
+    MEM --> PG3
+    SAVE --> PG3
+    TOOLS --> PG1
+    TOOLS --> PG3
+    GEN -.-> PG2
+    CHAT -.-> PG2
 ```
 
-Los datos persisten en el volumen de Docker `pgdata`. Para eliminar también ese volumen, usa `docker compose down -v`.
+⏸ indica una pausa que espera a una persona. El grafo exacto, generado desde el código con `uv run cvertidor graph`, está en [`docs/grafo.md`](./docs/grafo.md). El boceto inicial del proyecto está en [`docs/boceto_inicial_ep1.png`](./docs/boceto_inicial_ep1.png).
+
+### Módulos
+
+| Módulo | Responsabilidad |
+|---|---|
+| [`graph/`](./src/cvertidor/graph) | Estado, nodos, rutas, planificador, agente de conversación y ejecución (`run_agent`, `resume_agent`, `chat_agent`) |
+| [`tools/`](./src/cvertidor/tools) | Herramientas de consulta y de escritura del agente |
+| [`memory/`](./src/cvertidor/memory) | Checkpoints por hilo y memoria de largo plazo |
+| [`rag/`](./src/cvertidor/rag) | Fragmentación, sincronización con pgvector y recuperación |
+| [`validation/`](./src/cvertidor/validation) | Chequeos deterministas y umbrales |
+| [`llm/`](./src/cvertidor/llm) | Modelos por rol, respaldos, embeddings y cliente de la Decisions API |
+| [`ingestion/`](./src/cvertidor/ingestion) | Lectura de archivos (solo texto) y enmascarado de datos personales |
+| [`prompts/`](./src/cvertidor/prompts), [`schemas/`](./src/cvertidor/schemas), [`render/`](./src/cvertidor/render) | Prompts, esquemas Pydantic y salida en Markdown y HTML |
+| [`observability.py`](./src/cvertidor/observability.py) | Registro de auditoría local en JSONL |
+
+## Herramientas del agente
+
+Solo el agente de conversación tiene herramientas, y decide cuáles usar en cada mensaje. El `candidate_id` se toma del estado del grafo y nunca es un argumento del modelo.
+
+| Tipo | Herramienta | Qué hace |
+|---|---|---|
+| Consulta | `search_candidate_experience` | Búsqueda semántica en los fragmentos del candidato |
+| Consulta | `get_candidate_profile` | CV original completo, enmascarado |
+| Consulta | `recall_preferences` | Preferencias recordadas, con búsqueda semántica opcional |
+| Escritura | `edit_cv` | Aplica el último mensaje de la persona al borrador y lo valida |
+| Escritura | `save_cv_files` | Guarda Markdown y HTML; rechaza un CV no aprobado |
+| Escritura | `remember_preference` | Propone guardar una preferencia; la persona confirma |
+| Escritura | `forget_preference` | Propone borrar una preferencia; la persona confirma |
+
+El razonamiento lo hace el modelo en el ciclo `refine_agent` ⇄ herramientas, con un máximo de 6 llamadas por mensaje.
+
+## Memoria y recuperación de contexto
+
+| Tipo | Dónde | Qué guarda |
+|---|---|---|
+| Corto plazo | `PostgresSaver`, por `--thread` | Estado completo del grafo y conversación. Una pausa sobrevive al cierre del proceso |
+| Largo plazo | `PostgresStore`, compartido entre hilos | CV estructurado, requisitos de ofertas, preferencias y CV generados |
+| Semántica | pgvector | Fragmentos del CV (MMR + `EmbeddingsFilter`), preferencias y ofertas anteriores |
+
+En conversaciones largas se envían unos 2.000 tokens de historial; lo anterior se resume en `conversation_summary` y se elimina del estado. El CV actual viaja aparte, de modo que no se recorta.
+
+## Planificación y decisiones adaptativas
+
+El nodo `plan` es determinista: no usa un modelo y se puede probar sin red. Decide el idioma de salida, el orden de las secciones y las consultas de recuperación.
+
+| Condición | Decisión del agente | Evidencia |
+|---|---|---|
+| El CV y la oferta ya se procesaron | No llama a los modelos de extracción | [Escenario 2](./docs/evidencia/escenarios.md) |
+| Oferta en otro idioma, o preferencia confirmada | Traduce el CV y los títulos de sección | [Escenario 3](./docs/evidencia/escenarios.md) |
+| Menos del 50 % de los requisitos obligatorios en el CV | Pone habilidades y formación antes que la experiencia | [Escenario 4](./docs/evidencia/escenarios.md) |
+| Menos de 2 fragmentos de experiencia relevantes | Reintenta con otra consulta y un umbral 0,05 menor | [Escenario 4](./docs/evidencia/escenarios.md) |
+| El modelo omite toda la experiencia | Restaura empresa, cargo y fechas por código, y avisa | [Escenario 4](./docs/evidencia/escenarios.md) |
+| El modelo omite la educación o los idiomas | Los copia del CV original por código, y avisa | [Escenario 8](./docs/evidencia/escenarios.md) |
+| Datos fuera del CV original | Rechaza y edita el borrador rechazado, hasta 3 intentos | [Escenario 8](./docs/evidencia/escenarios.md) |
+| Un reintento repite el mismo borrador | Deja de reintentar | Pruebas de `tests/test_graph.py` |
+| Falla el modelo en un reintento | Conserva el borrador y pregunta a una persona, incluso con `--auto` | Pruebas de `tests/test_graph.py` |
+| Resultado dudoso o modelo de decisión no disponible | Consulta al juez | Pruebas de `tests/test_graph.py` |
+| Sin aprobación automática | Pregunta a una persona, incluso con `--auto` | [Escenario 6](./docs/evidencia/escenarios.md) |
+
+### Validación
+
+Va de la capa más barata a la más cara:
+
+1. **Chequeos deterministas:** empresas, instituciones, certificaciones, años, habilidades y cifras deben existir en el CV original. También controla el idioma, la extensión y los marcadores sin resolver.
+2. **Modelo de decisión (Span-01 Lite):** entrega la probabilidad de que el CV invente datos u omita requisitos. Aprueba con `inventa_datos ≤ 0,15` y `omite_requisitos ≤ 0,4`, y rechaza con 0,65 o más en cualquiera.
+3. **Juez (modelo de lenguaje):** revisa los casos dudosos, o todos si no hay `OPENROUTER_API_KEY`.
+4. **Persona:** revisa el CV aprobado y decide lo que la automatización no resolvió.
+
+Lo que escribe una persona en una corrección cuenta como dato confirmado para esa ejecución, y el CV final lo advierte.
+
+## Modelos
+
+| Rol | Modelo por defecto | Respaldo |
+|---|---|---|
+| Extracción, análisis de oferta, generación, agente, juez | `gemini-3.1-flash-lite` | `gemini-3-flash-preview` |
+| Embeddings | `gemini-embedding-2` (768 dimensiones) | `all-MiniLM-L6-v2` local |
+| Decisión | `respan/span-01-lite:free` (OpenRouter, opcional) | Juez |
+
+Cada rol se puede cambiar en `.env` con el formato `proveedor:modelo`, sin tocar el código. [`.env.example`](./.env.example) incluye un perfil con modelos gratuitos de OpenRouter. Pruebe cualquier cambio con `uv run cvertidor check-models`.
 
 ## Uso
 
-### Ejecutar localmente
+| Comando | Para qué |
+|---|---|
+| `cvertidor run --cv ... --job ... [--thread ID]` | Genera un CV y pide revisarlo |
+| `cvertidor run ... --auto` | No pide revisar un CV aprobado |
+| `cvertidor run ... --reprocesar` | Ignora la memoria y vuelve a extraer |
+| `cvertidor resume --thread ID` | Retoma una decisión pendiente |
+| `cvertidor resume --thread ID --decision corregir --comentario "..."` | Responde sin preguntas interactivas |
+| `cvertidor chat --thread ID` | Conversa con el agente sobre el CV del hilo |
+| `cvertidor chat --thread ID --mensaje "..."` | Envía un solo mensaje |
+| `cvertidor graph [--salida docs/grafo.md]` | Exporta el grafo en Mermaid |
+| `cvertidor check-models` | Prueba cada modelo con una llamada mínima |
 
-Inicia Jupyter desde el entorno virtual:
+Anteponga `uv run` a cada comando. Códigos de salida: `0` correcto, `2` error de entrada o base de datos, `3` proveedor saturado o sin cuota, `4` decisión pendiente.
+
+### Notebook y Colab
+
+[`notebooks/CVertidor.ipynb`](./notebooks/CVertidor.ipynb) es una demostración que solo llama al paquete. En Colab, configure los secretos `GOOGLE_API_KEY` y `DB_URL`; la base debe tener pgvector y ser accesible desde Internet, por ejemplo en Supabase. El notebook instala el paquete desde la rama `master`.
+
+### Base de datos
+
+`compose.yml` levanta PostgreSQL con pgvector en `localhost:5432`. Las tablas de memoria se crean solas. `docker compose down` detiene la base, y `docker compose down -v` además borra sus datos.
+
+## Pruebas y evidencia
 
 ```bash
-pip install jupyter
-jupyter notebook
+uv run pytest
 ```
 
-Abre [`CVertidor.ipynb`](./CVertidor.ipynb) y ejecuta las celdas en orden. En la celda de entrada, reemplaza `tu_curriculum` y `oferta_de_trabajo` por tus textos:
+Las 127 pruebas no llaman a ningún modelo: usan modelos falsos, y un bloqueo en [`tests/conftest.py`](./tests/conftest.py) hace fallar cualquier conexión fuera de la máquina. No gastan tokens ni requieren claves.
 
-```python
-tu_curriculum = """
-Nombre: Ana Pérez
-Experiencia: ...
-Habilidades: Python, SQL, PostgreSQL
-"""
+- [`docs/evidencia/escenarios.md`](./docs/evidencia/escenarios.md): salida real de cada escenario.
+- [`docs/evidencia/pruebas.txt`](./docs/evidencia/pruebas.txt): resultado de la suite.
+- [`docs/evidencia/auditoria_ejemplo.jsonl`](./docs/evidencia/auditoria_ejemplo.jsonl): eventos de auditoría de esos escenarios.
 
-oferta_de_trabajo = """
-Buscamos una persona desarrolladora Python con experiencia en APIs y PostgreSQL.
-"""
-```
+### Mediciones que respaldan la configuración
 
-El notebook valida que ambos textos tengan una longitud mínima. Si el contenido es demasiado corto, utiliza datos de ejemplo incluidos en el notebook.
+Medido con el CV ficticio de `samples/`; los valores pueden cambiar con otros CV.
 
-Al finalizar, se muestran las versiones Markdown y HTML, y se crean dos archivos en el directorio de trabajo:
+**Modelo de decisión, Span-01 Lite:**
 
-```text
-cv_ana_pérez.md
-cv_ana_pérez.html
-```
+| Caso | `inventa_datos` | `omite_requisitos` |
+|---|---|---|
+| CV fiel | 0,025 | 0,003 |
+| Datos inventados | 0,964 | 0,005 |
+| Inyección que pide responder "no", con un premio inventado | 0,965 | 0,006 |
+| Una sola habilidad agregada | 0,143 | 0,004 |
+| Experiencia eliminada | 0,016 | 0,991 |
 
-### Ejecutar en Google Colab
+La habilidad agregada no se rechaza por puntaje; la detectan los chequeos deterministas.
 
-También puedes abrir directamente el notebook con el botón de la parte superior. En Colab:
+**Filtro de similitud, `gemini-embedding-2`:** la experiencia del CV obtiene 0,64 a 0,78 frente a ofertas afines (mediana cercana a 0,75) y 0,65 a 0,69 frente a una ajena. El umbral es 0,70.
 
-1. Instala las dependencias ejecutando la celda de instalación.
-2. Configura `DB_URL` y `GOOGLE_API_KEY` como secretos de Colab.
-3. Asegúrate de que la base PostgreSQL sea accesible desde Internet y tenga `pgvector` habilitado.
-4. Ejecuta las celdas en orden.
-5. Descarga los archivos HTML o Markdown generados desde el entorno de Colab.
+**Tokens por ejecución,** con el mismo CV y oferta (escenarios 1 y 2): unos 6.600 en la primera y unos 2.400 al reutilizar la memoria.
 
-Para una ejecución local, el notebook carga `DB_URL` y `API_KEY` desde `.env`; en Colab utiliza `DB_URL` y `GOOGLE_API_KEY` desde `userdata`.
+## Privacidad
 
-## Estructura del repositorio
+- Antes de la extracción se enmascaran correos, teléfonos, RUT y URL. Los valores reales se restauran localmente.
+- Consultas, fragmentos y contexto de generación van enmascarados, incluido el nombre. Esto cubre lo que reciben el modelo de decisión, el juez y el agente.
+- El registro de auditoría no guarda textos del CV ni de la oferta, y el candidato aparece como un hash.
 
-```text
-.
-├── CVertidor.ipynb  # Flujo completo de extracción, RAG y generación del CV
-├── compose.yml      # PostgreSQL con pgvector para desarrollo local
-├── init.sql         # Activación de la extensión vector
-├── requirements.txt # Dependencias de Python
-├── .env.example     # Plantilla de configuración local
-└── .gitignore
-```
+**Límites:** el modelo de extracción sí recibe el nombre, y las empresas, instituciones y fechas llegan a los modelos; con ellos se puede identificar a una persona. PostgreSQL guarda el CV original y sus datos de contacto, y los metadatos de los fragmentos incluyen un identificador derivado del nombre. No use CV reales sin revisar las condiciones de su proveedor, ni una base remota sin evaluar esos datos.
 
-## Consideraciones y limitaciones
+## Limitaciones
 
-- El proyecto no incluye una interfaz web ni un servicio HTTP; la interfaz actual es el notebook.
-- La generación depende de una API de Google cuando se usa Gemini como modelo principal.
-- El fallback de embeddings requiere descargar el modelo de Hugging Face la primera vez.
-- No subas `.env`, claves API ni currículums reales al repositorio. `.env` ya está excluido por [`.gitignore`](./.gitignore).
+- Solo tiene interfaz de línea de comandos y notebook, sin servicio web.
+- Los umbrales se calibraron con un solo CV ficticio.
+- Nada verifica automáticamente que una corrección se haya aplicado; se revisa en la vista previa. Lo que escribe la persona se acepta como cierto.
+- El modelo de decisión usa una API en fase alfa de OpenRouter. Si falla, decide el juez.
+- La API de Gemini puede responder 503 en horas de alta demanda, incluso en ambos modelos; la CLI lo informa y termina con el código 3.
+- Los PDF escaneados no se leen: no hay OCR.
+- La integración con Langfuse quedó pospuesta. La trazabilidad actual es el registro local de `logs/audit.jsonl`.
+

@@ -4,16 +4,17 @@ from contextlib import nullcontext
 import pytest
 from langchain_core.documents import Document
 from langchain_core.embeddings import DeterministicFakeEmbedding
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.runnables import RunnableLambda
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 
 from cvertidor import cli, pipeline
-from cvertidor.graph import builder, edges, nodes, runner
+from cvertidor.graph import builder, edges, nodes, refine, runner
 from cvertidor.llm.decisions import DecisionError, DecisionResult
 from cvertidor.llm.embeddings import EmbeddingsInfo
-from cvertidor.pipeline import GenerationError
+from cvertidor.pipeline import GenerationError, InputError
 from cvertidor.rag.vector_store import SyncStats
 from cvertidor.schemas.evaluation import JudgeReview
 from cvertidor.schemas.job import JobRequirements
@@ -84,7 +85,9 @@ def fake_world(monkeypatch, make_settings, sample_cv, tmp_path):
 
     monkeypatch.setattr(nodes, "build_retriever", fake_retriever)
 
-    def fake_generate(context, job_text, parsed_cv, settings, plan=""):
+    def fake_generate(context, job_text, parsed_cv, settings, plan="", current_draft=None, human_edit=False):
+        calls["current_draft"] = current_draft
+        calls.setdefault("drafts", []).append((current_draft, human_edit))
         calls["generate_plan"] = plan
         calls["generate"] += 1
         calls["context"] = context
@@ -101,10 +104,15 @@ def fake_world(monkeypatch, make_settings, sample_cv, tmp_path):
 
     def run(job_text=JOB_ES, cv_text=CV_TEXT, **kwargs):
         # Un vector store cualquiera: el recuperador y la sincronización son falsos
+        kwargs.setdefault("auto_approve", True)
         return runner.run_agent(cv_text, job_text, settings, embeddings_info=info, **kwargs)
 
-    return {"run": run, "calls": calls, "retrieval_results": retrieval_results,
-            "job_result": job_result, "settings": settings, "store": store,
+    def resume(thread_id, action, feedback=None):
+        # El grafo se vuelve a compilar: equivale a retomar desde otro proceso
+        return runner.resume_agent(thread_id, action, feedback, settings, embeddings_info=info)
+
+    return {"run": run, "resume": resume, "calls": calls, "retrieval_results": retrieval_results,
+            "job_result": job_result, "settings": settings, "store": store, "info": info,
             "decision": decision, "judge_review": judge_review}
 
 
@@ -128,6 +136,8 @@ def test_flujo_completo_con_experiencia_relevante(fake_world):
     assert "Idioma de salida: español." in fake_world["calls"]["generate_plan"]
     assert "--- Chunk (education) ---" in fake_world["calls"]["context"]
     assert [m.step for m in result.metrics].count("generate") == 1
+    record = fake_world["store"].search(("generations", result.candidate_id))[0].value
+    assert record["generation_attempts"] == 1
 
 
 def test_sin_experiencia_reintenta_con_consultas_mas_amplias(fake_world):
@@ -158,7 +168,10 @@ def test_agota_los_intentos_y_genera_con_aviso(fake_world):
 
 
 def test_oferta_en_ingles_genera_en_ingles(fake_world):
-    result = fake_world["run"](JOB_EN)
+    # El generador falso responde en español: el chequeo de idioma lo detecta y decide una persona
+    pending = fake_world["run"](JOB_EN, thread_id="ingles")
+    assert any("idioma de salida es 'en'" in issue for issue in pending.issues)
+    result = fake_world["resume"]("ingles", "aceptar")
 
     assert result.plan.output_language == "en"
     assert "Traduce el contenido del candidato del español al inglés." in fake_world["calls"]["generate_plan"]
@@ -263,21 +276,60 @@ def test_ningun_dato_personal_llega_a_los_modelos(fake_world, monkeypatch, sampl
 def test_rechazo_corrige_con_retroalimentacion_hasta_tres_intentos(fake_world):
     fake_world["decision"]["value"] = DecisionResult({"inventa_datos": 0.96, "omite_requisitos": 0.01})
 
-    result = fake_world["run"]()
+    pending = fake_world["run"]()
 
-    assert fake_world["calls"]["generate"] == result.generation_attempts == 3
+    assert fake_world["calls"]["generate"] == pending.attempts == 3
     assert "Correcciones obligatorias" in fake_world["calls"]["generate_plan"]
-    assert result.verdict.status == "rejected" and result.output_paths
-    assert any("sin aprobarse tras 3 intentos" in w for w in result.warnings)
+    assert (pending.kind, pending.status) == ("escalation", "rejected")
     assert fake_world["calls"]["judge"] == 0
+    # El primer intento escribe desde cero; los reintentos editan el borrador rechazado
+    first, *retries = fake_world["calls"]["drafts"]
+    assert first == (None, False)
+    assert len(retries) == 2
+    assert all("## Experiencia Laboral" in draft and not human_edit for draft, human_edit in retries)
 
     # Un reintento que devuelve el mismo borrador corta el bucle: repetirlo solo gastaría tokens
     fake_world["calls"].update(generate=0, same_draft=True)
-    assert fake_world["run"]().generation_attempts == 2
+    assert fake_world["run"]().attempts == 2
+
+
+def test_borrador_conserva_los_marcadores_del_cv_original():
+    from cvertidor.ingestion.pii import unmask
+    from cvertidor.schemas.cv import StandardCV, WorkExperience
+
+    url_a, url_b = "https://a.example.com/x", "https://b.example.com/y"
+    def cv(*urls):
+        return StandardCV(candidate_name="Ana Pérez", work_history=[
+            WorkExperience(company="C", role="R", responsibilities=[f"Proyecto {u}" for u in urls])])
+
+    source, draft = cv(url_a, url_b), cv(url_b)  # el borrador omitió la primera URL
+
+    masked = nodes.review_markdown(draft, "es", source)
+
+    assert url_b not in masked
+    restored = unmask(masked, pipeline.mask_cv(source)[1])
+    assert url_b in restored and url_a not in restored
+
+
+def test_seccion_omitida_se_restaura_salvo_que_la_pida_una_persona(fake_world, monkeypatch):
+    def without_education(context, job_text, parsed_cv, settings, plan="", current_draft=None, human_edit=False):
+        return parsed_cv.model_copy(update={"education": []}, deep=True), ai()
+
+    monkeypatch.setattr(nodes, "generate_adapted_cv", without_education)
+
+    result = fake_world["run"]()
+    assert result.generation_attempts == 1
+    assert result.adapted_cv.education == result.parsed_cv.education
+    assert any("la educación" in w for w in result.warnings)
+
+    pending = fake_world["run"](auto_approve=False, thread_id="quita-educacion")
+    assert "## Educación" in pending.preview
+    corrected = fake_world["resume"]("quita-educacion", "corregir", "Quita la educación")
+    assert "## Educación" not in corrected.preview
 
 
 def test_experiencia_omitida_se_restaura_sin_gastar_otro_intento(fake_world, monkeypatch):
-    def without_roles(context, job_text, parsed_cv, settings, plan=""):
+    def without_roles(context, job_text, parsed_cv, settings, plan="", current_draft=None, human_edit=False):
         return parsed_cv.model_copy(update={"work_history": []}, deep=True), ai()
 
     monkeypatch.setattr(nodes, "generate_adapted_cv", without_roles)
@@ -295,18 +347,236 @@ def test_dudoso_o_sin_modelo_de_decision_decide_el_juez(fake_world):
     assert fake_world["calls"]["judge"] == 1
     assert (result.verdict.status, result.verdict.source, result.generation_attempts) == ("approved", "judge", 1)
 
-    # Sin modelo de decisión, y además el juez rechaza una vez: se corrige con su retroalimentación
+    # Sin modelo de decisión, y además el juez rechaza: se corrige con su retroalimentación
     fake_world["decision"]["value"] = DecisionError("sin clave")
     fake_world["judge_review"]["value"] = JudgeReview(approved=False, feedback="Quita la cifra inventada.")
-    result = fake_world["run"]()
+    pending = fake_world["run"]()
     assert "Quita la cifra inventada." in fake_world["calls"]["generate_plan"]
-    assert result.generation_attempts == 3
+    assert (pending.kind, pending.attempts) == ("escalation", 3)
 
-    # Si tampoco responde el juez, el CV se guarda con un aviso claro y sin reintentar
+    # Si tampoco responde el juez, sin reintentar decide una persona, incluso con --auto
     fake_world["judge_review"]["value"] = ConnectionError("caído")
-    result = fake_world["run"]()
-    assert (result.verdict.status, result.generation_attempts) == ("uncertain", 1)
-    assert any("Nadie pudo evaluar" in w for w in result.warnings)
+    pending = fake_world["run"]()
+    assert (pending.kind, pending.status, pending.attempts) == ("escalation", "uncertain", 1)
+
+
+def test_revision_humana_pausa_y_se_retoma(fake_world):
+    pending = fake_world["run"](auto_approve=False, thread_id="revision")
+    assert isinstance(pending, runner.PendingDecision)
+    assert (pending.kind, pending.options) == ("review", ["aprobar", "corregir", "descartar"])
+    assert "## Experiencia Laboral" in pending.preview
+    assert not list(fake_world["settings"].output_dir.glob("*"))  # aún no se guarda nada
+
+    # Mientras espera no se puede iniciar otra ejecución ni dar una decisión inválida
+    with pytest.raises(InputError, match="decisión pendiente"):
+        fake_world["run"](auto_approve=False, thread_id="revision")
+    with pytest.raises(InputError, match="no válida"):
+        fake_world["resume"]("revision", "aceptar")
+    with pytest.raises(InputError, match="qué cambiar"):
+        fake_world["resume"]("revision", "corregir", "  ")
+
+    # Corregir regenera con la instrucción (sin datos personales) y vuelve a preguntar
+    again = fake_world["resume"]("revision", "corregir", "Quita los intereses de ana@empresa.cl")
+    assert isinstance(again, runner.PendingDecision) and again.attempts == 2
+    context = fake_world["calls"]["context"]
+    assert "Quita los intereses" in context and "ana@empresa.cl" not in context
+
+    result = fake_world["resume"]("revision", "aprobar")
+    assert result.human_decision == "aprobar" and all(p.exists() for p in result.output_paths)
+    with pytest.raises(InputError, match="ninguna decisión"):
+        fake_world["resume"]("revision", "aprobar")
+
+    # Descartar termina sin archivos, aunque el hilo tenga los de la ejecución anterior
+    fake_world["run"](auto_approve=False, thread_id="revision")
+    discarded = fake_world["resume"]("revision", "descartar")
+    assert discarded.discarded and discarded.output_paths == []
+
+
+def test_correcciones_se_acumulan_editan_el_borrador_y_pueden_agregar_datos(fake_world, monkeypatch):
+    calls = fake_world["calls"]
+
+    def fake_edit(context, job_text, parsed_cv, settings, plan="", current_draft=None, human_edit=False):
+        calls.update(context=context, current_draft=current_draft)
+        draft = parsed_cv.model_copy(deep=True)
+        if "Claude Code" in context:
+            draft.technical_skills = [*draft.technical_skills, "Claude Code"]
+        return draft, ai()
+
+    monkeypatch.setattr(nodes, "generate_adapted_cv", fake_edit)
+    fake_world["run"](auto_approve=False, thread_id="edita")
+    assert calls["current_draft"] is None
+
+    # Un dato que no está en el CV pasa la validación porque lo confirmó una persona; quitar
+    # un requisito a propósito (omisión alta) tampoco hace que el sistema lo vuelva a poner
+    fake_world["decision"]["value"] = DecisionResult({"inventa_datos": 0.01, "omite_requisitos": 0.99})
+    first = fake_world["resume"]("edita", "corregir", "Añadir Claude Code")
+    assert first.status == "approved" and "Claude Code" in first.preview
+    assert "## Experiencia Laboral" in calls["current_draft"]
+
+    second = fake_world["resume"]("edita", "corregir", "Quitar Looker")
+    assert second.corrections == ["Añadir Claude Code", "Quitar Looker"]
+    assert "Añadir Claude Code" in calls["context"] and "Quitar Looker" in calls["context"]
+    assert "Claude Code" in calls["current_draft"]  # edita sobre el resultado de la corrección anterior
+
+    result = fake_world["resume"]("edita", "aprobar")
+    assert "Claude Code" in result.adapted_cv.technical_skills
+    assert any("indicados por una persona" in w and "Claude Code" in w for w in result.warnings)
+
+    # Las correcciones valen para esa ejecución: no quedan en el perfil ni en la siguiente
+    fake_world["decision"]["value"] = DecisionResult({"inventa_datos": 0.01, "omite_requisitos": 0.01})
+    next_run = fake_world["run"](thread_id="edita")
+    assert next_run.human_corrections == [] and "Claude Code" not in next_run.parsed_cv.technical_skills
+
+
+def test_escalacion_permite_corregir_una_sola_vez(fake_world):
+    fake_world["decision"]["value"] = DecisionResult({"inventa_datos": 0.96, "omite_requisitos": 0.01})
+
+    pending = fake_world["run"](thread_id="esc")  # también con --auto
+    assert pending.options == ["aceptar", "corregir", "descartar"]
+
+    # Corregir reinicia los intentos automáticos; la segunda vez ya no se ofrece
+    fake_world["calls"]["generate"] = 0
+    pending = fake_world["resume"]("esc", "corregir", "Quita lo inventado")
+    assert fake_world["calls"]["generate"] == pending.attempts == 3
+    assert pending.options == ["aceptar", "descartar"]
+
+    result = fake_world["resume"]("esc", "aceptar")
+    assert result.output_paths and any("decisión humana" in w for w in result.warnings)
+
+
+def _scripted(monkeypatch, replies, seen):
+    """Modelo del agente con respuestas fijas; registra lo que recibe en cada llamada"""
+    queue = list(replies)
+
+    def model(*args, **kwargs):
+        def run(messages):
+            seen.append(messages)
+            return queue.pop(0)
+        return RunnableLambda(run)
+
+    monkeypatch.setattr(refine, "get_tool_model", model)
+    monkeypatch.setattr(refine, "get_chat_model", lambda *a, **k: RunnableLambda(lambda _: AIMessage("RESUMEN COMPRIMIDO")))
+
+
+def _call(name, **args):
+    return AIMessage("", tool_calls=[{"name": name, "args": args, "id": f"id-{name}", "type": "tool_call"}])
+
+
+def test_agente_edita_guarda_y_recuerda_con_confirmacion(fake_world, monkeypatch):
+    with pytest.raises(InputError, match="no tiene un CV"):
+        runner.chat_agent("sin-cv", "hola", fake_world["settings"], embeddings_info=fake_world["info"])
+
+    first = fake_world["run"](thread_id="chat")
+    seen = []
+    _scripted(monkeypatch, [
+        _call("edit_cv", output_language="en"),
+        _call("remember_preference", preference="siempre en inglés", output_language="en"),
+        AIMessage("Listo, [CANDIDATO_1]."),
+        _call("save_cv_files"),
+        _call("save_cv_files"),
+        AIMessage("Guardado."),
+        _call("forget_preference", preference="ingles siempre"),
+        AIMessage("Se conserva."),
+        _call("forget_preference", preference="siempre en inglés"),
+        AIMessage("Olvidada."),
+    ], seen)
+    # El candidato nunca es un argumento que el modelo pueda elegir
+    arguments = {name for t in refine.REFINER_TOOLS for name in t.tool_call_schema.model_json_schema().get("properties", {})}
+    assert arguments == {"query", "preference", "output_language"}
+
+    def chat(message):
+        return runner.chat_agent("chat", message, fake_world["settings"], embeddings_info=fake_world["info"])
+
+    pending = chat(f"Tradúcelo al inglés y recuérdalo. Soy {first.parsed_cv.candidate_name}, ana@empresa.cl")
+    assert pending.kind == "preference" and "siempre en inglés" in pending.question
+
+    # El dato confirmado es el texto de la persona, enmascarado; el draft se editó y está en inglés
+    assert first.parsed_cv.candidate_name not in fake_world["calls"]["context"]
+    assert "Tradúcelo al inglés" in fake_world["calls"]["context"]
+    assert fake_world["store"].search(("preferences", first.candidate_id)) == []  # aún no confirmada
+
+    reply = fake_world["resume"]("chat", "guardar")
+    assert isinstance(reply, runner.ChatReply)
+    assert reply.text == f"Listo, {first.parsed_cv.candidate_name}."  # la persona lee su dato real
+    assert all(first.parsed_cv.candidate_name not in str(m.content) for call in seen for m in call)
+
+    # Guardar dos veces lo mismo deja un solo par de archivos y un solo registro
+    before = len(list(fake_world["settings"].output_dir.glob("*")))
+    records = len(fake_world["store"].search(("generations", first.candidate_id), limit=50))
+    saved = chat("Guárdalo")
+    assert [p.suffix for p in saved.output_paths] == [".md", ".html"]
+    assert len(list(fake_world["settings"].output_dir.glob("*"))) == before + 2
+    assert len(fake_world["store"].search(("generations", first.candidate_id), limit=50)) == records + 1
+
+    # Otro hilo del mismo candidato recuerda la preferencia, incluso con una oferta en español
+    pending = fake_world["run"](thread_id="otro-hilo", auto_approve=False)
+    assert "## Work Experience" in pending.preview
+    fake_world["resume"]("otro-hilo", "descartar")
+
+    # Olvidar también se confirma: se muestra la preferencia real, aunque se haya pedido con otras palabras
+    pending = chat("Olvida lo del inglés")
+    assert (pending.options, pending.question) == (["olvidar", "conservar"], "¿Olvido esta preferencia?: siempre en inglés")
+    assert fake_world["resume"]("chat", "conservar").text == "Se conserva."
+    assert len(fake_world["store"].search(("preferences", first.candidate_id))) == 1
+
+    chat("Olvida lo del inglés")
+    assert fake_world["resume"]("chat", "olvidar").text == "Olvidada."
+    assert fake_world["store"].search(("preferences", first.candidate_id)) == []
+    assert "## Experiencia Laboral" in fake_world["run"](thread_id="tercer-hilo", auto_approve=False).preview
+
+
+def test_hilo_largo_respeta_el_presupuesto_y_conserva_resumen_y_borrador(fake_world, monkeypatch):
+    fake_world["run"](thread_id="largo")
+    seen = []
+    _scripted(monkeypatch, [AIMessage("respuesta " * 100) for _ in range(12)], seen)
+
+    for turn in range(12):
+        runner.chat_agent("largo", f"Pregunta {turn}: " + "detalle " * 100, fake_world["settings"],
+                          embeddings_info=fake_world["info"])
+
+    system, *history = seen[-1]
+    assert count_tokens_approximately(history) <= refine.HISTORY_TOKENS
+    assert "RESUMEN COMPRIMIDO" in system.content and "## Experiencia Laboral" in system.content
+    assert isinstance(history[0], HumanMessage) and "Pregunta 11" in history[-1].content
+
+
+def test_fallo_del_modelo_en_un_reintento_conserva_el_borrador(fake_world, monkeypatch):
+    fake_world["decision"]["value"] = DecisionResult({"inventa_datos": 0.96, "omite_requisitos": 0.01})
+    first_call = nodes.generate_adapted_cv
+
+    def fails_on_retry(*args, **kwargs):
+        if fake_world["calls"]["generate"] >= 1:
+            raise GenerationError("salida inválida")
+        return first_call(*args, **kwargs)
+
+    monkeypatch.setattr(nodes, "generate_adapted_cv", fails_on_retry)
+
+    pending = fake_world["run"](thread_id="reintento-falla")
+
+    assert (pending.kind, pending.status, pending.attempts) == ("escalation", "rejected", 2)
+    assert "Intento 1" in pending.preview
+    assert any("No se pudo generar" in issue for issue in pending.issues)
+    # El mismo borrador no se valida otra vez: el modelo de decisión se llamó una sola vez
+    assert len(fake_world["calls"]["reviewed"]) == 2
+
+    result = fake_world["resume"]("reintento-falla", "aceptar")
+    assert result.adapted_cv.interests == ["Intento 1"] and result.output_paths
+
+
+def test_fallo_al_aplicar_una_correccion_no_la_da_por_aplicada(fake_world, monkeypatch):
+    fake_world["run"](auto_approve=False, thread_id="correccion-falla")
+
+    def down(*args, **kwargs):
+        raise RuntimeError("503 UNAVAILABLE")
+
+    monkeypatch.setattr(nodes, "generate_adapted_cv", down)
+    pending = fake_world["resume"]("correccion-falla", "corregir", "Añadir Claude Code")
+
+    assert pending.kind == "escalation" and pending.corrections == []
+    assert any("no se aplicó" in issue for issue in pending.issues)
+
+    result = fake_world["resume"]("correccion-falla", "aceptar")
+    assert not any("indicados por una persona" in w for w in result.warnings)
 
 
 def test_error_en_un_nodo_queda_auditado(fake_world, monkeypatch):
@@ -332,12 +602,14 @@ def test_ruta_despues_de_recuperar(docs, attempts, expected):
 
 def test_diagrama_mermaid():
     mermaid = builder.graph_mermaid()
-    for node in ("load_memory", "ingest_cv", "index_cv", "analyze_job", "plan", "retrieve", "generate", "validate", "judge", "render_and_save"):
+    for node in ("load_memory", "ingest_cv", "index_cv", "analyze_job", "plan", "retrieve", "generate", "validate", "judge", "human_review", "human_escalation", "render_and_save", "refine_agent", "tools", "confirm_preference"):
         assert node in mermaid
     # Arista condicional: reintento de la recuperación o paso a la generación
     assert "retrieve -.-> retrieve" in mermaid
     assert "retrieve -.-> generate" in mermaid
+    assert "generate -.-> human_escalation" in mermaid
     assert "load_memory -.-> analyze_job" in mermaid and "load_memory -.-> index_cv" in mermaid
+    assert "refine_agent -.-> plan" not in mermaid and "confirm_preference -.-> plan" not in mermaid
 
 
 def test_cli_graph_guarda_markdown(tmp_path, capsys):

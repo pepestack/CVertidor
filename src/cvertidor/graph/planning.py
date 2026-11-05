@@ -73,9 +73,11 @@ def build_plan(
     job_text: str,
     cv_text: str = "",
     preferences: list[str] | None = None,
+    preferred_language: str | None = None,
 ) -> Plan:
-    # El idioma detectado en el texto manda; el que informó el modelo solo desempata
-    output_language = detect_language(job_text) or job.language
+    # Una preferencia confirmada por la persona manda; luego el idioma detectado en el texto.
+    # El que informó el modelo solo desempata
+    output_language = preferred_language or detect_language(job_text) or job.language
     cv_language = detect_language(cv_text or cv_haystack(cv)) or "es"
 
     haystack = cv_haystack(cv)

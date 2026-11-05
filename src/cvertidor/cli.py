@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import re
 from pathlib import Path
 
 from cvertidor import __version__
@@ -31,6 +32,20 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--thread", help="Hilo de conversación: reutilizarlo continúa su estado (por defecto, uno nuevo)")
     run.add_argument("--reprocesar", action="store_true",
                      help="Ignora el CV y la oferta guardados en memoria y vuelve a llamar a los modelos")
+    run.add_argument("--auto", action="store_true",
+                     help="No pide revisar un CV aprobado (si la validación no lo aprueba, sí se pregunta)")
+
+    resume = subparsers.add_parser("resume", help="Retoma un hilo pausado esperando una decisión")
+    resume.add_argument("--thread", required=True, help="Hilo a retomar")
+    resume.add_argument("--decision", choices=["aprobar", "aceptar", "corregir", "descartar", "guardar", "omitir", "olvidar", "conservar"],
+                        help="Decisión (por defecto se muestra lo pendiente y se pregunta)")
+    resume.add_argument("--comentario", help="Qué cambiar, si la decisión es corregir")
+    resume.add_argument("--salida", help="Carpeta de salida (por defecto OUTPUT_DIR o ./output)")
+
+    chat = subparsers.add_parser("chat", help="Conversa con el agente para afinar el CV de un hilo")
+    chat.add_argument("--thread", required=True, help="Hilo con un CV ya generado")
+    chat.add_argument("--mensaje", help="Envía este mensaje y termina (por defecto, conversación interactiva)")
+    chat.add_argument("--salida", help="Carpeta de salida (por defecto OUTPUT_DIR o ./output)")
 
     graph = subparsers.add_parser("graph", help="Exporta el diagrama del grafo de LangGraph en Mermaid")
     graph.add_argument("--salida", help="Archivo .mmd o .md donde guardarlo (por defecto se imprime)")
@@ -53,25 +68,19 @@ def cmd_graph(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_run(args: argparse.Namespace) -> int:
+def _guarded(call):
+    """Ejecuta el agente y traduce los errores esperables a un mensaje; devuelve un código de salida si falla"""
     import psycopg
 
-    from cvertidor.config import get_settings
-    from cvertidor.ingestion.loaders import DocumentLoadError, load_text
+    from cvertidor.config import ConfigError
+    from cvertidor.ingestion.loaders import DocumentLoadError
     from cvertidor.llm.check import error_status
     from cvertidor.llm.providers import ModelConfigError
-    from cvertidor.graph.runner import run_agent
     from cvertidor.pipeline import GenerationError, InputError
 
-    settings = get_settings()
-    if args.salida:
-        settings = settings.model_copy(update={"output_dir": Path(args.salida)})
-
     try:
-        cv_text, job_text = load_text(args.cv), load_text(args.job)
-        result = run_agent(cv_text, job_text, settings, on_step=lambda m: print(f"-> {m}"),
-                           thread_id=args.thread, reprocess=args.reprocesar)
-    except (DocumentLoadError, InputError, ModelConfigError, GenerationError) as error:
+        return call()
+    except (ConfigError, DocumentLoadError, InputError, ModelConfigError, GenerationError) as error:
         print(f"Error: {error}")
         return 2
     except psycopg.OperationalError as error:
@@ -80,7 +89,16 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"Detalle: {str(error).strip()[:200]}")
         return 2
     except Exception as error:
-        if error_status(error) != 429:
+        status = error_status(error)
+        if status in (400, 401, 403) and re.search(r"api.?key|permission|unauthorized|credential", str(error), re.I):
+            print(f"Error: el proveedor rechazó la clave de API ({status}). Revise GOOGLE_API_KEY en .env.")
+            return 2
+        if status in (500, 502, 503, 504):
+            # Todos los modelos de la cadena fallaron por el proveedor, no por el agente
+            print(f"Error: el proveedor de modelos no está disponible ahora ({status}, alta demanda). "
+                  "Reintente en unos minutos; el CV y la oferta ya procesados quedan en memoria y no se repiten.")
+            return 3
+        if status != 429:
             raise
         # Todos los modelos de la cadena respondieron 429
         message = str(error)
@@ -95,6 +113,152 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"Detalle: {str(error).strip()[:200]}")
         return 3
 
+
+VERDICT_LABELS = {"approved": "aprobado", "rejected": "rechazado", "uncertain": "sin evaluar"}
+VERDICT_SOURCES = {"checks": "chequeos", "decision_model": "modelo de decisión", "judge": "juez",
+                   "human": "una persona", "none": "ninguno"}
+
+
+def _print_pending(pending) -> None:
+    if pending.kind == "preference":
+        print(f"\n{pending.question}")
+        return
+    scores = ", ".join(f"{name} {value:.2f}" for name, value in pending.scores.items())
+    print(f"\n{'=' * 70}\n{pending.preview}\n{'=' * 70}")
+    print(f"Validación: {VERDICT_LABELS[pending.status]} por {VERDICT_SOURCES[pending.source]} "
+          f"en {pending.attempts} intento{'s' if pending.attempts != 1 else ''}{f' ({scores})' if scores else ''}")
+    for correction in pending.corrections:
+        print(f"  Corrección aplicada: {correction}")
+    for issue in pending.issues:
+        print(f"  Problema: {issue}")
+    for warning in pending.warnings:
+        print(f"  Aviso: {warning}")
+    print(pending.question)
+
+
+def _ask_decision(pending) -> tuple[str, str | None] | None:
+    """Decisión escrita por la persona; None para dejarla pendiente (o si no hay terminal)"""
+    menu = " / ".join(f"[{o[0]}]{o[1:]}" for o in pending.options) + " / [p]ausar"
+    shortcuts = {o[0]: o for o in pending.options}
+    try:
+        while True:
+            answer = input(f"{menu}: ").strip().lower()
+            if answer in ("p", "pausar"):
+                return None
+            action = shortcuts.get(answer[:1])
+            if not action:
+                continue
+            if action != "corregir":
+                return action, None
+            feedback = input("¿Qué hay que cambiar? (el contacto se cambia en el CV original): ").strip()
+            if feedback:
+                return action, feedback
+    except EOFError:
+        return None
+
+
+def _drive(outcome, settings, decision: tuple[str, str | None] | None = None) -> int:
+    """Pregunta a la persona mientras el grafo esté pausado y muestra el resultado final"""
+    from cvertidor.graph.runner import ChatReply, PendingDecision, resume_agent
+
+    while isinstance(outcome, PendingDecision):
+        _print_pending(outcome)
+        decision = decision or _ask_decision(outcome)
+        if decision is None:
+            print(f"\nDecisión pendiente. Retome con: cvertidor resume --thread {outcome.thread_id}")
+            return 4
+        action, feedback = decision
+        decision = None
+        thread_id = outcome.thread_id
+        outcome = _guarded(lambda: resume_agent(thread_id, action, feedback, settings,
+                                                on_step=lambda m: print(f"-> {m}")))
+    if isinstance(outcome, int):
+        return outcome
+    if isinstance(outcome, ChatReply):
+        _print_reply(outcome)
+    else:
+        _print_result(outcome, settings)
+    return 0
+
+
+def _print_reply(reply) -> None:
+    print(f"\nAgente: {reply.text}")
+    for warning in reply.warnings:
+        print(f"Aviso: {warning}")
+    for path in reply.output_paths:
+        print(f"  Guardado: {path}")
+    used = [m for m in reply.metrics if m.input_tokens is not None]
+    if used:
+        print(f"  ({len(used)} llamadas, {sum(m.input_tokens + (m.output_tokens or 0) for m in used)} tokens)")
+
+
+def cmd_chat(args: argparse.Namespace) -> int:
+    from cvertidor.config import get_settings
+    from cvertidor.graph.runner import chat_agent
+
+    settings = get_settings()
+    if args.salida:
+        settings = settings.model_copy(update={"output_dir": Path(args.salida)})
+
+    def send(message: str) -> int:
+        return _drive(_guarded(lambda: chat_agent(args.thread, message, settings,
+                                                  on_step=lambda m: print(f"-> {m}"))), settings)
+
+    if args.mensaje:
+        return send(args.mensaje)
+    print("Escriba 'salir' para terminar. Los cambios no se guardan hasta que lo pida.")
+    while True:
+        try:
+            message = input("\nUsted: ").strip()
+        except EOFError:
+            return 0
+        if message.lower() in ("salir", "exit"):
+            return 0
+        if message:
+            code = send(message)
+            if code:
+                return code
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    from cvertidor.config import get_settings
+    from cvertidor.graph.runner import run_agent
+    from cvertidor.ingestion.loaders import load_text
+
+    settings = get_settings()
+    if args.salida:
+        settings = settings.model_copy(update={"output_dir": Path(args.salida)})
+
+    def call():
+        cv_text, job_text = load_text(args.cv), load_text(args.job)
+        return run_agent(cv_text, job_text, settings, on_step=lambda m: print(f"-> {m}"),
+                         thread_id=args.thread, reprocess=args.reprocesar, auto_approve=args.auto)
+
+    return _drive(_guarded(call), settings)
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
+    from cvertidor.config import get_settings
+    from cvertidor.graph.runner import resume_agent
+
+    settings = get_settings()
+    if args.salida:
+        settings = settings.model_copy(update={"output_dir": Path(args.salida)})
+    if args.decision:
+        return _drive(_guarded(lambda: resume_agent(args.thread, args.decision, args.comentario, settings,
+                                                    on_step=lambda m: print(f"-> {m}"))), settings)
+    # Sin decisión en la línea de comandos: se muestra lo pendiente y se pregunta
+    pending = _guarded(lambda: _load_pending(args.thread, settings))
+    return _drive(pending, settings)
+
+
+def _load_pending(thread_id: str, settings):
+    from cvertidor.graph.runner import pending_decision
+
+    return pending_decision(thread_id, settings)
+
+
+def _print_result(result, settings) -> None:
     plan = result.plan
     print(f"\nHilo: {result.thread_id} (ejecución {result.runs_in_thread})")
     print(f"Memoria: CV {'reutilizado' if result.cv_from_memory else 'procesado'}, "
@@ -116,23 +280,25 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"Recuperados para la oferta: {len(result.retrieved_docs)} "
           f"en {result.retrieval_attempts} intento{'s' if result.retrieval_attempts != 1 else ''}")
     verdict = result.verdict
-    labels = {"approved": "aprobado", "rejected": "rechazado", "uncertain": "sin evaluar"}
-    sources = {"checks": "chequeos", "decision_model": "modelo de decisión", "judge": "juez", "none": "ninguno"}
     scores = ", ".join(f"{name} {value:.2f}" for name, value in verdict.scores.items())
-    print(f"Validación: {labels[verdict.status]} por {sources[verdict.source]} "
+    print(f"Validación: {VERDICT_LABELS[verdict.status]} por {VERDICT_SOURCES[verdict.source]} "
           f"en {result.generation_attempts} intento{'s' if result.generation_attempts != 1 else ''}"
           f"{f' ({scores})' if scores else ''}")
+    if result.human_decision:
+        print(f"Decisión humana: {result.human_decision}")
     for m in result.metrics:
         tokens = f", {m.input_tokens} -> {m.output_tokens} tokens" if m.input_tokens is not None else ""
         model = f", {m.model}" if m.model else ""
         print(f"  {m.step:<9} {m.seconds:5.1f} s{model}{tokens}")
     for warning in result.warnings:
         print(f"Aviso: {warning}")
-    print("\nArchivos generados:")
-    for path in result.output_paths:
-        print(f"  {path}")
+    if result.discarded:
+        print("\nCV descartado: no se guardó ningún archivo.")
+    else:
+        print("\nArchivos generados:")
+        for path in result.output_paths:
+            print(f"  {path}")
     print(f"Auditoría: {settings.log_dir / 'audit.jsonl'} (run_id {result.run_id})")
-    return 0
 
 
 def cmd_check_models(args: argparse.Namespace) -> int:
@@ -167,8 +333,10 @@ def cmd_check_models(args: argparse.Namespace) -> int:
 
 
 COMMANDS = {
+    "chat": cmd_chat,
     "check-models": cmd_check_models,
     "graph": cmd_graph,
+    "resume": cmd_resume,
     "run": cmd_run,
 }
 

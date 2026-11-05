@@ -14,6 +14,10 @@ COLAB_SECRETS = ("DB_URL", "OPENROUTER_API_KEY", "GOOGLE_API_KEY")
 GEMINI_FALLBACK = "google:gemini-3-flash-preview"
 
 
+class ConfigError(ValueError):
+    """Falta una variable de entorno necesaria"""
+
+
 def cargar_secretos_colab() -> bool:
     """Copia los secretos de Colab a os.environ; no hace nada fuera de Colab"""
     try:
@@ -94,7 +98,7 @@ class Settings(BaseSettings):
 
     def require_db_url(self) -> str:
         if not self.db_url:
-            raise ValueError("Falta DB_URL en las variables de entorno.")
+            raise ConfigError("Falta DB_URL en las variables de entorno. Copie .env.example a .env y complételo.")
         return self.db_url
 
     def role_models(self, role: str) -> tuple[list[str], str | None]:

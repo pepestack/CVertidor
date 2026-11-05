@@ -4,6 +4,7 @@ Los nodos del grafo de LangGraph (cvertidor.graph) las orquestan y deciden el or
 los reintentos y los caminos alternativos.
 """
 
+import hashlib
 import re
 import time
 from collections.abc import Callable
@@ -16,7 +17,7 @@ from pydantic import BaseModel
 from cvertidor.config import Settings
 from cvertidor.ingestion.pii import MaskResult, mask_pii, scrub_pii, unmask
 from cvertidor.llm.providers import StructuredOutputError, get_structured_model
-from cvertidor.prompts.generation import GENERATION_PROMPT
+from cvertidor.prompts.generation import GENERATION_PROMPT, REVISION_BLOCK, VALIDATION_REVISION_BLOCK
 from cvertidor.prompts.parsing import PARSING_PROMPT
 from cvertidor.schemas.cv import StandardCV
 
@@ -78,12 +79,13 @@ def unmask_model(model: BaseModel, mapping: dict[str, str]) -> BaseModel:
     return _map_strings(model, lambda value: unmask(value, mapping))
 
 
-def mask_cv(cv: StandardCV) -> tuple[StandardCV, dict[str, str]]:
+def mask_cv(cv: StandardCV, mapping: dict[str, str] | None = None) -> tuple[StandardCV, dict[str, str]]:
     """Copia del CV sin datos personales, con una sola numeración de marcadores. Es lo único
     que se indexa o se envía a los modelos después de la extracción. Es determinista: el
-    mismo CV produce los mismos marcadores, así que no hay que guardar el mapeo"""
-    mapping: dict[str, str] = {}
-    masked = _map_strings(cv, lambda value: mask_pii(value, mapping).text.replace(cv.candidate_name, CANDIDATE_TOKEN))
+    mismo CV produce los mismos marcadores, así que no hay que guardar el mapeo.
+    Con `mapping` (el del CV original) un borrador conserva los marcadores de ese CV"""
+    mapping = dict(mapping or {})
+    masked =_map_strings(cv, lambda value: mask_pii(value, mapping).text.replace(cv.candidate_name, CANDIDATE_TOKEN))
     mapping[CANDIDATE_TOKEN] = cv.candidate_name
     return masked, mapping
 
@@ -138,11 +140,17 @@ def generate_adapted_cv(
     parsed_cv: StandardCV,
     settings: Settings,
     plan: str = "",
+    current_draft: str | None = None,
+    human_edit: bool = False,
 ) -> tuple[StandardCV, Any]:
+    """Con `current_draft` edita ese borrador en vez de reescribir: según las correcciones de una
+    persona (`human_edit`) o, si no, según lo que rechazó la validación"""
     chain = GENERATION_PROMPT | get_structured_model("generator", StandardCV, include_raw=True, settings=settings)
+    block = REVISION_BLOCK if human_edit else VALIDATION_REVISION_BLOCK
     adapted, raw = invoke_structured(
         chain,
-        {"context": context, "job_description": scrub_pii(job_text), "plan": plan or "- Sin instrucciones adicionales."},
+        {"context": context, "job_description": scrub_pii(job_text), "plan": plan or "- Sin instrucciones adicionales.",
+         "revision": block.format(draft=current_draft) if current_draft else ""},
         "StandardCV adaptado",
     )
     # El contexto va enmascarado: se restauran los marcadores que el modelo haya copiado
@@ -152,7 +160,9 @@ def generate_adapted_cv(
     adapted.location = parsed_cv.location
     for name in CONTACT_FIELDS:
         setattr(adapted, name, getattr(parsed_cv, name))
-    restore_roles(adapted, parsed_cv)
+    # Una persona puede haber pedido cambiar un cargo
+    if not human_edit:
+        restore_roles(adapted, parsed_cv)
     return adapted, raw
 
 
@@ -163,6 +173,16 @@ def restore_missing_work_history(adapted: StandardCV, original: StandardCV) -> b
         return False
     adapted.work_history = [w.model_copy(update={"responsibilities": []}) for w in original.work_history]
     return True
+
+
+def restore_missing_sections(adapted: StandardCV, original: StandardCV, sections: list[str]) -> list[str]:
+    """Los chequeos revisan lo que hay en el borrador, no lo que falta: una sección que siempre
+    debe ir y que el modelo dejó vacía se copia del CV original. Devuelve las restauradas"""
+    source = original.model_copy(deep=True)
+    restored = [name for name in sections if not getattr(adapted, name) and getattr(source, name)]
+    for name in restored:
+        setattr(adapted, name, getattr(source, name))
+    return restored
 
 
 def restore_roles(adapted: StandardCV, original: StandardCV) -> None:
@@ -183,9 +203,12 @@ def ensure_db_available(db_url: str) -> None:
         conn.execute("SELECT 1")
 
 
-def save_outputs(candidate_id: str, markdown: str, html: str, output_dir: Path) -> list[Path]:
+def save_outputs(candidate_id: str, markdown: str, html: str, output_dir: Path, job_text: str = "") -> list[Path]:
+    """Los nombres dependen del contenido: guardar lo mismo dos veces no duplica archivos, y un
+    CV para otra oferta no sobrescribe el anterior. candidate_id solo contiene [a-z0-9_]"""
     output_dir.mkdir(parents=True, exist_ok=True)
-    paths = [output_dir / f"cv_{candidate_id}.md", output_dir / f"cv_{candidate_id}.html"]
+    version = hashlib.sha256(f"{job_text}\n{markdown}".encode("utf-8")).hexdigest()[:8]
+    paths = [output_dir / f"cv_{candidate_id}_{version}.md", output_dir / f"cv_{candidate_id}_{version}.html"]
     paths[0].write_text(markdown, encoding="utf-8")
     paths[1].write_text(html, encoding="utf-8")
     return paths

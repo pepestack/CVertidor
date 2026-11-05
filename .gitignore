@@ -4,3 +4,9 @@ __pycache__/
 .pytest_cache/
 output/
 logs/
+.ipynb_checkpoints/
+*.egg-info
+build/
+dist/
+*.log
+.DS_Store

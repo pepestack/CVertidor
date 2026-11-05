@@ -3,9 +3,11 @@
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Annotated, Any, TypedDict
+from typing import Annotated, Any, Literal, TypedDict
 
 from langchain_core.documents import Document
+from langchain_core.messages import AnyMessage
+from langgraph.graph.message import add_messages
 
 from cvertidor.config import Settings
 from cvertidor.graph.planning import Plan
@@ -26,9 +28,13 @@ def accumulate(current: list | None, update: list | None) -> list:
 
 
 class AgentState(TypedDict, total=False):
-    # Entrada
+    # Entrada: "run" genera un CV; "chat" conversa sobre el que ya existe en el hilo
+    mode: Literal["run", "chat"]
     cv_text: str
     job_text: str
+    run_id: str
+    # Omite la revisión humana de un CV aprobado (la escalación siempre pregunta)
+    auto_approve: bool
     # load_memory: qué se reutilizó de la memoria de largo plazo
     runs_in_thread: int
     cv_hash: str
@@ -51,13 +57,27 @@ class AgentState(TypedDict, total=False):
     generation_attempts: int
     # El intento repitió el borrador anterior: otro reintento no cambiaría nada
     draft_repeated: bool
+    # El modelo falló en un reintento: se conserva el borrador anterior y decide una persona
+    generation_failed: bool
     context: str
     draft_cv: StandardCV
     verdict: Verdict
+    # human_review y human_escalation
+    human_decision: str | None
+    # Se acumulan durante la ejecución, enmascaradas. No pasan al perfil de largo plazo
+    human_corrections: list[str]
+    escalation_resets: int
     # render_and_save
     markdown: str
     html: str
     output_paths: list[str]
+    # Conversación (memoria de corto plazo). Los mensajes llegan enmascarados a los modelos
+    messages: Annotated[list[AnyMessage], add_messages]
+    conversation_summary: str | None
+    refine_steps: int
+    # Preferencias que el modelo propuso y que la persona debe confirmar
+    preference_queue: Annotated[list[dict], accumulate]
+    preferences_handled: int
     # Se acumulan entre nodos (ingest_cv y analyze_job corren en paralelo)
     warnings: Annotated[list[str], accumulate]
     metrics: Annotated[list[StepMetrics], accumulate]

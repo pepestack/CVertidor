@@ -1,5 +1,6 @@
 """Prompt de generación del CV adaptado a la oferta: el del notebook más el plan del
-nodo `plan` (idioma de salida y prioridades) y el recordatorio final de extensión."""
+nodo `plan` (idioma de salida y prioridades), el recordatorio final de extensión y, si una
+persona o la validación pidieron cambios, el borrador actual para editarlo en vez de reescribirlo."""
 
 from langchain_core.prompts import ChatPromptTemplate
 
@@ -21,6 +22,7 @@ REGLAS
 - Conserva sin alterar nombres, empresas, cargos, fechas y datos cuantitativos.
 - Escribe en el idioma de salida indicado en <plan>; si no se indica, mantén el idioma del contexto del candidato. Al traducir, conserva sin cambios nombres propios, empresas, cargos, instituciones, títulos de certificaciones y cifras; de las fechas solo pueden traducirse los nombres de meses y "Presente".
 - <plan> define prioridades y énfasis, pero nunca autoriza a agregar información que no esté en el contexto del candidato.
+- La sección "Correcciones confirmadas por el candidato" de <candidate_context>, si existe, es información cierta y tiene prioridad sobre el resto: agrega lo que indique aunque no aparezca en otra parte y elimina lo que pida quitar.
 
 PRIORIZACIÓN
 - Prioriza experiencia, habilidades y certificaciones relevantes para la oferta.
@@ -52,6 +54,26 @@ PLAN DE ADAPTACIÓN:
 </plan>
 
 Genera el CV adaptado a esta oferta, usando únicamente la información del contexto del candidato.
-Recuerda: como máximo 4 responsabilidades por cargo (elige las más relevantes para la oferta) y un perfil profesional de 2–3 líneas."""
+Recuerda: como máximo 4 responsabilidades por cargo (elige las más relevantes para la oferta) y un perfil profesional de 2–3 líneas.{revision}"""
     )
 ])
+
+# Bloque que se agrega al final del mensaje cuando una persona pidió cambios
+REVISION_BLOCK = """
+
+BORRADOR ACTUAL:
+<current_draft>
+{draft}
+</current_draft>
+
+Edita <current_draft> aplicando todas las correcciones confirmadas por el candidato. Conserva sin cambios todo lo demás: mismo texto, mismas secciones y mismo orden."""
+
+# Bloque que se agrega al final del mensaje cuando la validación rechazó el intento anterior
+VALIDATION_REVISION_BLOCK = """
+
+BORRADOR RECHAZADO:
+<current_draft>
+{draft}
+</current_draft>
+
+Edita <current_draft> resolviendo únicamente las correcciones obligatorias indicadas en <plan>. No agregues ni quites elementos que esas correcciones no mencionen: conserva las mismas secciones, con los mismos elementos y en el mismo orden. Usa solo <candidate_context> como fuente de datos."""

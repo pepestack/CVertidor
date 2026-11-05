@@ -53,8 +53,11 @@ def error_status(error: BaseException) -> int | None:
             value = getattr(candidate, attr, None)
             if isinstance(value, int):
                 return value
-    if "RESOURCE_EXHAUSTED" in str(error):
+    message = str(error)
+    if "RESOURCE_EXHAUSTED" in message:
         return 429
+    if "UNAVAILABLE" in message:
+        return 503
     return None
 
 
@@ -66,6 +69,7 @@ def describe_error(error: Exception) -> str:
         402: "sin créditos para este modelo (402)",
         404: "modelo no encontrado (404)",
         429: "límite de uso alcanzado (429), reintente más tarde",
+        503: "modelo saturado por el proveedor (503), reintente más tarde",
     }
     if status in known:
         return known[status]

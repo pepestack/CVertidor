@@ -9,8 +9,8 @@ from cvertidor.schemas.cv import _lenient_list
 
 class Verdict(BaseModel):
     status: Literal["approved", "rejected", "uncertain"]
-    # Quién decidió: chequeos deterministas, modelo de decisión o juez
-    source: Literal["checks", "decision_model", "judge", "none"] = "none"
+    # Quién decidió: chequeos deterministas, modelo de decisión, juez o una persona
+    source: Literal["checks", "decision_model", "judge", "human", "none"] = "none"
     # Probabilidad de cada conducta indebida según el modelo de decisión
     scores: dict[str, float] = Field(default_factory=dict)
     issues: list[str] = Field(default_factory=list)
