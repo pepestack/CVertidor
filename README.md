@@ -57,6 +57,8 @@ flowchart TD
     VAL -->|sin resolver| ESC{{"human_escalation ⏸"}}
     JUD -->|sin resolver| ESC
     DRAFT -->|"el modelo falla en un reintento<br/>(conserva el borrador)"| ESC
+    VAL -->|"aprobado con --auto"| SAVE
+    JUD -->|"aprobado con --auto"| SAVE
     REV -->|aprobar| SAVE["render_and_save<br/>Markdown y HTML"]
     REV -->|corregir| DRAFT
     ESC -->|aceptar| SAVE
@@ -68,9 +70,11 @@ flowchart TD
     subgraph CHAT["Conversación (cvertidor chat)"]
         AG["refine_agent"] <--> TOOLS["Herramientas"]
         TOOLS -->|preferencia propuesta| CONF{{"confirm_preference ⏸"}}
+        CONF -->|"quedan preferencias por confirmar<br/>(una pausa por cada una)"| CONF
         CONF --> AG
     end
 
+    AG -->|"sin herramientas que llamar"| FIN
     SAVE -. mismo hilo .-> AG
 
     subgraph DB["PostgreSQL con pgvector"]
