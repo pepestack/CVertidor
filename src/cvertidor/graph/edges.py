@@ -53,6 +53,12 @@ def route_after_retrieve(state: AgentState) -> Literal["retrieve", "generate"]:
     return "retrieve"
 
 
+def route_after_generate(state: AgentState) -> Literal["validate", "human_escalation"]:
+    """Sin un borrador nuevo no se valida otra vez: gastaría una llamada y podría aprobar el
+    mismo borrador que se acaba de rechazar"""
+    return "human_escalation" if state.get("generation_failed") else "validate"
+
+
 def retries_left(state: AgentState) -> bool:
     return state.get("generation_attempts", 0) < MAX_GENERATION_ATTEMPTS and not state.get("draft_repeated")
 

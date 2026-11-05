@@ -57,6 +57,8 @@ class AgentState(TypedDict, total=False):
     generation_attempts: int
     # El intento repitió el borrador anterior: otro reintento no cambiaría nada
     draft_repeated: bool
+    # El modelo falló en un reintento: se conserva el borrador anterior y decide una persona
+    generation_failed: bool
     context: str
     draft_cv: StandardCV
     verdict: Verdict

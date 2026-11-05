@@ -175,6 +175,16 @@ def restore_missing_work_history(adapted: StandardCV, original: StandardCV) -> b
     return True
 
 
+def restore_missing_sections(adapted: StandardCV, original: StandardCV, sections: list[str]) -> list[str]:
+    """Los chequeos revisan lo que hay en el borrador, no lo que falta: una sección que siempre
+    debe ir y que el modelo dejó vacía se copia del CV original. Devuelve las restauradas"""
+    source = original.model_copy(deep=True)
+    restored = [name for name in sections if not getattr(adapted, name) and getattr(source, name)]
+    for name in restored:
+        setattr(adapted, name, getattr(source, name))
+    return restored
+
+
 def restore_roles(adapted: StandardCV, original: StandardCV) -> None:
     """Los cargos se conservan textualmente aunque el CV se traduzca (los modelos los
     traducen pese a la instrucción); se emparejan por empresa"""

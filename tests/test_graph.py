@@ -311,6 +311,23 @@ def test_borrador_conserva_los_marcadores_del_cv_original():
     assert url_b in restored and url_a not in restored
 
 
+def test_seccion_omitida_se_restaura_salvo_que_la_pida_una_persona(fake_world, monkeypatch):
+    def without_education(context, job_text, parsed_cv, settings, plan="", current_draft=None, human_edit=False):
+        return parsed_cv.model_copy(update={"education": []}, deep=True), ai()
+
+    monkeypatch.setattr(nodes, "generate_adapted_cv", without_education)
+
+    result = fake_world["run"]()
+    assert result.generation_attempts == 1
+    assert result.adapted_cv.education == result.parsed_cv.education
+    assert any("la educación" in w for w in result.warnings)
+
+    pending = fake_world["run"](auto_approve=False, thread_id="quita-educacion")
+    assert "## Educación" in pending.preview
+    corrected = fake_world["resume"]("quita-educacion", "corregir", "Quita la educación")
+    assert "## Educación" not in corrected.preview
+
+
 def test_experiencia_omitida_se_restaura_sin_gastar_otro_intento(fake_world, monkeypatch):
     def without_roles(context, job_text, parsed_cv, settings, plan="", current_draft=None, human_edit=False):
         return parsed_cv.model_copy(update={"work_history": []}, deep=True), ai()
@@ -523,6 +540,45 @@ def test_hilo_largo_respeta_el_presupuesto_y_conserva_resumen_y_borrador(fake_wo
     assert isinstance(history[0], HumanMessage) and "Pregunta 11" in history[-1].content
 
 
+def test_fallo_del_modelo_en_un_reintento_conserva_el_borrador(fake_world, monkeypatch):
+    fake_world["decision"]["value"] = DecisionResult({"inventa_datos": 0.96, "omite_requisitos": 0.01})
+    first_call = nodes.generate_adapted_cv
+
+    def fails_on_retry(*args, **kwargs):
+        if fake_world["calls"]["generate"] >= 1:
+            raise GenerationError("salida inválida")
+        return first_call(*args, **kwargs)
+
+    monkeypatch.setattr(nodes, "generate_adapted_cv", fails_on_retry)
+
+    pending = fake_world["run"](thread_id="reintento-falla")
+
+    assert (pending.kind, pending.status, pending.attempts) == ("escalation", "rejected", 2)
+    assert "Intento 1" in pending.preview
+    assert any("No se pudo generar" in issue for issue in pending.issues)
+    # El mismo borrador no se valida otra vez: el modelo de decisión se llamó una sola vez
+    assert len(fake_world["calls"]["reviewed"]) == 2
+
+    result = fake_world["resume"]("reintento-falla", "aceptar")
+    assert result.adapted_cv.interests == ["Intento 1"] and result.output_paths
+
+
+def test_fallo_al_aplicar_una_correccion_no_la_da_por_aplicada(fake_world, monkeypatch):
+    fake_world["run"](auto_approve=False, thread_id="correccion-falla")
+
+    def down(*args, **kwargs):
+        raise RuntimeError("503 UNAVAILABLE")
+
+    monkeypatch.setattr(nodes, "generate_adapted_cv", down)
+    pending = fake_world["resume"]("correccion-falla", "corregir", "Añadir Claude Code")
+
+    assert pending.kind == "escalation" and pending.corrections == []
+    assert any("no se aplicó" in issue for issue in pending.issues)
+
+    result = fake_world["resume"]("correccion-falla", "aceptar")
+    assert not any("indicados por una persona" in w for w in result.warnings)
+
+
 def test_error_en_un_nodo_queda_auditado(fake_world, monkeypatch):
     def broken(*args, **kwargs):
         raise GenerationError("salida inválida")
@@ -551,6 +607,7 @@ def test_diagrama_mermaid():
     # Arista condicional: reintento de la recuperación o paso a la generación
     assert "retrieve -.-> retrieve" in mermaid
     assert "retrieve -.-> generate" in mermaid
+    assert "generate -.-> human_escalation" in mermaid
     assert "load_memory -.-> analyze_job" in mermaid and "load_memory -.-> index_cv" in mermaid
     assert "refine_agent -.-> plan" not in mermaid and "confirm_preference -.-> plan" not in mermaid
 

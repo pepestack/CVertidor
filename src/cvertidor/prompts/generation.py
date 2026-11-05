@@ -76,4 +76,4 @@ BORRADOR RECHAZADO:
 {draft}
 </current_draft>
 
-Edita <current_draft> resolviendo únicamente las correcciones obligatorias indicadas en <plan>. Conserva sin cambios todo lo demás y usa solo <candidate_context> como fuente de datos."""
+Edita <current_draft> resolviendo únicamente las correcciones obligatorias indicadas en <plan>. No agregues ni quites elementos que esas correcciones no mencionen: conserva las mismas secciones, con los mismos elementos y en el mismo orden. Usa solo <candidate_context> como fuente de datos."""

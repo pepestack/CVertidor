@@ -490,3 +490,95 @@ Agente: He borrado la preferencia: a partir de ahora, la sección de intereses v
   (2 llamadas, 6105 tokens)
 [código de salida: 0]
 ```
+
+## 8. Reintento automático: edita el borrador rechazado y restaura una sección omitida
+
+Capturado el 2026-11-04. [`forzar_rechazo.py`](./forzar_rechazo.py) ejecuta la CLI real, pero agrega la habilidad `Kubernetes`, que no está en el CV, al primer borrador para forzar un rechazo de los chequeos deterministas. Los modelos y la validación son los reales. El script se ejecutó desde una carpeta temporal; aquí se muestra su ruta en el repositorio.
+
+Se hicieron tres ejecuciones con cada modelo. La tabla compara el primer borrador con la respuesta del modelo en el segundo intento, antes de restaurar secciones:
+
+| Modelo | Ejecución | Campos que cambian | Habilidades quitadas / agregadas | Sección restaurada por código | Validación |
+|---|---|---|---|---|---|
+| `gemini-3.1-flash-lite` | 1 | `technical_skills` | `Kubernetes` / ninguna | Ninguna | Aprobado en 2 intentos |
+| `gemini-3.1-flash-lite` | 2 | `technical_skills` | `Kubernetes` / ninguna | Ninguna | Aprobado en 2 intentos |
+| `gemini-3.1-flash-lite` | 3 | `technical_skills` | `Kubernetes` / ninguna | Ninguna | Aprobado en 2 intentos |
+| `gemini-3-flash-preview` | 1 | `technical_skills` | `Kubernetes` / ninguna | Ninguna | Aprobado en 2 intentos |
+| `gemini-3-flash-preview` | 2 | `technical_skills`, `education` | `Kubernetes` / ninguna | `education` | Aprobado en 2 intentos |
+| `gemini-3-flash-preview` | 3 | `technical_skills`, `education` | `Kubernetes` / ninguna | `education` | Aprobado en 2 intentos |
+
+Las ejecuciones 2 y 3 de `gemini-3-flash-preview` devolvieron el mismo resultado (mismos tokens y mismo archivo generado).
+
+Primera ejecución con `gemini-3.1-flash-lite`:
+
+```text
+$ uv run python docs/evidencia/forzar_rechazo.py run --cv samples/cv_sebastian_navarro.txt --job samples/oferta_data_engineer_banco.txt --thread evid-retry-81 --auto
+-> Consultando la memoria del agente...
+-> Sincronizando los fragmentos del CV en pgvector...
+-> Planificando la adaptación (idioma, prioridades y consultas)...
+-> Recuperando la experiencia relevante para la oferta...
+-> Generando el CV adaptado a la oferta...
+-> Validando el CV generado...
+-> Corrigiendo el CV según la validación (intento 2)...
+-> Validando el CV generado...
+-> Guardando el CV en Markdown y HTML...
+
+Hilo: evid-retry-81 (ejecución 1)
+Memoria: CV reutilizado, oferta reutilizada, 0 preferencias
+  Generación anterior más parecida: Data Engineer (2026-11-03T23:19:48+00:00, similitud 1.00)
+Candidato: Sebastián Alejandro Navarro Paredes (sebastian_alejandro_navarro_paredes)
+Oferta: Data Engineer | 8 requisitos obligatorios, 4 deseables
+Plan: salida en es, cobertura de requisitos 88%, prioridad work_history > technical_skills > certifications > education
+  Requisitos ausentes en el CV: Ingeniería Civil Informática
+Fragmentos: 0 nuevos, 0 eliminados, 27 sin cambios (embeddings: google:models/gemini-embedding-2)
+Recuperados para la oferta: 15 en 1 intento
+Validación: aprobado por modelo de decisión en 2 intentos (inventa_datos 0.01, omite_requisitos 0.00)
+  index       0.1 s
+  retrieve    2.0 s
+  generate    3.0 s, gemini-3.1-flash-lite, 1807 -> 602 tokens
+  validate    0.0 s
+  generate2   2.7 s, gemini-3.1-flash-lite, 2351 -> 602 tokens
+  validate    1.0 s
+
+Archivos generados:
+  output\cv_sebastian_alejandro_navarro_paredes_379bb113.md
+  output\cv_sebastian_alejandro_navarro_paredes_379bb113.html
+Auditoría: logs\audit.jsonl (run_id 3414395129df)
+```
+
+Segunda ejecución con `gemini-3-flash-preview`, donde el modelo omite la educación y el código la restaura:
+
+```text
+$ GENERATOR_MODEL=google:gemini-3-flash-preview uv run python docs/evidencia/forzar_rechazo.py run --cv samples/cv_sebastian_navarro.txt --job samples/oferta_data_engineer_banco.txt --thread evid-retry-92 --auto
+-> Consultando la memoria del agente...
+-> Sincronizando los fragmentos del CV en pgvector...
+-> Planificando la adaptación (idioma, prioridades y consultas)...
+-> Recuperando la experiencia relevante para la oferta...
+-> Generando el CV adaptado a la oferta...
+-> Validando el CV generado...
+-> Corrigiendo el CV según la validación (intento 2)...
+-> Validando el CV generado...
+-> Guardando el CV en Markdown y HTML...
+
+Hilo: evid-retry-92 (ejecución 1)
+Memoria: CV reutilizado, oferta reutilizada, 0 preferencias
+  Generación anterior más parecida: Data Engineer (2026-11-03T23:19:48+00:00, similitud 1.00)
+Candidato: Sebastián Alejandro Navarro Paredes (sebastian_alejandro_navarro_paredes)
+Oferta: Data Engineer | 8 requisitos obligatorios, 4 deseables
+Plan: salida en es, cobertura de requisitos 88%, prioridad work_history > technical_skills > certifications > education
+  Requisitos ausentes en el CV: Ingeniería Civil Informática
+Fragmentos: 0 nuevos, 0 eliminados, 27 sin cambios (embeddings: google:models/gemini-embedding-2)
+Recuperados para la oferta: 15 en 1 intento
+Validación: aprobado por modelo de decisión en 2 intentos (inventa_datos 0.01, omite_requisitos 0.01)
+  index       0.1 s
+  retrieve    2.0 s
+  generate    4.1 s, gemini-3-flash-preview, 1807 -> 620 tokens
+  validate    0.0 s
+  generate2   3.8 s, gemini-3-flash-preview, 2321 -> 566 tokens
+  validate    0.6 s
+Aviso: El modelo omitió la educación: se copió del CV original.
+
+Archivos generados:
+  output\cv_sebastian_alejandro_navarro_paredes_01ef2cbd.md
+  output\cv_sebastian_alejandro_navarro_paredes_01ef2cbd.html
+Auditoría: logs\audit.jsonl (run_id 0fbbea6352bb)
+```

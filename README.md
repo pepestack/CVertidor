@@ -56,6 +56,7 @@ flowchart TD
     JUD -->|aprobado| REV
     VAL -->|sin resolver| ESC{{"human_escalation ⏸"}}
     JUD -->|sin resolver| ESC
+    DRAFT -->|"el modelo falla en un reintento<br/>(conserva el borrador)"| ESC
     REV -->|aprobar| SAVE["render_and_save<br/>Markdown y HTML"]
     REV -->|corregir| DRAFT
     ESC -->|aceptar| SAVE
@@ -141,8 +142,10 @@ El nodo `plan` es determinista: no usa un modelo y se puede probar sin red. Deci
 | Menos del 50 % de los requisitos obligatorios en el CV | Pone habilidades y formación antes que la experiencia | [Escenario 4](./docs/evidencia/escenarios.md) |
 | Menos de 2 fragmentos de experiencia relevantes | Reintenta con otra consulta y un umbral 0,05 menor | [Escenario 4](./docs/evidencia/escenarios.md) |
 | El modelo omite toda la experiencia | Restaura empresa, cargo y fechas por código, y avisa | [Escenario 4](./docs/evidencia/escenarios.md) |
-| Datos fuera del CV original | Rechaza y edita el borrador rechazado, hasta 3 intentos | Pruebas de `tests/test_graph.py` |
+| El modelo omite la educación o los idiomas | Los copia del CV original por código, y avisa | [Escenario 8](./docs/evidencia/escenarios.md) |
+| Datos fuera del CV original | Rechaza y edita el borrador rechazado, hasta 3 intentos | [Escenario 8](./docs/evidencia/escenarios.md) |
 | Un reintento repite el mismo borrador | Deja de reintentar | Pruebas de `tests/test_graph.py` |
+| Falla el modelo en un reintento | Conserva el borrador y pregunta a una persona, incluso con `--auto` | Pruebas de `tests/test_graph.py` |
 | Resultado dudoso o modelo de decisión no disponible | Consulta al juez | Pruebas de `tests/test_graph.py` |
 | Sin aprobación automática | Pregunta a una persona, incluso con `--auto` | [Escenario 6](./docs/evidencia/escenarios.md) |
 
@@ -197,7 +200,7 @@ Anteponga `uv run` a cada comando. Códigos de salida: `0` correcto, `2` error d
 uv run pytest
 ```
 
-Las 122 pruebas no llaman a ningún modelo: usan modelos falsos, y un bloqueo en [`tests/conftest.py`](./tests/conftest.py) hace fallar cualquier conexión fuera de la máquina. No gastan tokens ni requieren claves.
+Las 127 pruebas no llaman a ningún modelo: usan modelos falsos, y un bloqueo en [`tests/conftest.py`](./tests/conftest.py) hace fallar cualquier conexión fuera de la máquina. No gastan tokens ni requieren claves.
 
 - [`docs/evidencia/escenarios.md`](./docs/evidencia/escenarios.md): salida real de cada escenario.
 - [`docs/evidencia/pruebas.txt`](./docs/evidencia/pruebas.txt): resultado de la suite.

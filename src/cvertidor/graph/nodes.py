@@ -24,6 +24,7 @@ from cvertidor.pipeline import (
     invoke_structured,
     mask_cv,
     parse_cv,
+    restore_missing_sections,
     restore_missing_work_history,
     save_outputs,
     step_metrics,
@@ -184,6 +185,7 @@ def plan(state: AgentState, ctx: AgentContext) -> dict:
         "retrieved_docs": [],
         "generation_attempts": 0,
         "draft_repeated": False,
+        "generation_failed": False,
         "verdict": None,
         # El hilo conserva el estado: nada de una ejecución anterior debe parecer de esta
         "human_decision": None,
@@ -277,24 +279,38 @@ def generate(state: AgentState, ctx: AgentContext) -> dict:
     current_draft = None
     if corrections or (verdict and verdict.feedback):
         current_draft = review_markdown(state["draft_cv"], state["plan"].output_language, state["parsed_cv"])
-    draft, raw = generate_adapted_cv(context, state["job_text"], state["parsed_cv"], ctx.settings,
-                                     plan=plan_text, current_draft=current_draft, human_edit=bool(corrections))
-    metrics = step_metrics("generate" if attempts == 1 else f"generate{attempts}", start, raw)
+    try:
+        draft, raw = generate_adapted_cv(context, state["job_text"], state["parsed_cv"], ctx.settings,
+                                         plan=plan_text, current_draft=current_draft, human_edit=bool(corrections))
+    except Exception as error:
+        # Sin veredicto no hay un borrador de esta ejecución que conservar
+        if verdict is None:
+            raise
+        return _keep_previous_draft(state, verdict, attempts, start, error)
+    metrics =step_metrics("generate" if attempts == 1 else f"generate{attempts}", start, raw)
     warnings = []
     if not corrections and restore_missing_work_history(draft, state["parsed_cv"]):
         warnings.append("El modelo omitió toda la experiencia laboral: se agregaron los cargos, sin responsabilidades.")
+    # Una persona puede haber pedido quitar una sección
+    restored = [] if corrections else restore_missing_sections(draft, state["parsed_cv"], ALWAYS_INCLUDED_SECTIONS)
+    if restored:
+        names = ", ".join(RESTORED_SECTION_NAMES[name] for name in restored)
+        untranslated = " (sin traducir)" if state["plan"].translate else ""
+        warnings.append(f"El modelo omitió {names}: se copió del CV original{untranslated}.")
     repeated = attempts > 1 and draft == state.get("draft_cv")
     return {
         "context": context,
         "draft_cv": draft,
         "generation_attempts": attempts,
         "draft_repeated": repeated,
+        "generation_failed": False,
         "warnings": warnings,
         "metrics": [metrics],
         "audit": {
             "attempt": attempts,
             "with_feedback": bool(verdict and verdict.feedback),
             "human_corrections": len(corrections),
+            "restored_sections": restored,
             "repeated": repeated,
             "model": metrics.model,
             "input_tokens": metrics.input_tokens,
@@ -303,6 +319,28 @@ def generate(state: AgentState, ctx: AgentContext) -> dict:
             "max_responsibilities": max((len(w.responsibilities) for w in draft.work_history), default=0),
         },
     }
+
+
+def _keep_previous_draft(state: AgentState, verdict: Verdict, attempts: int, start: float, error: Exception) -> dict:
+    """El borrador ya existe: que el modelo falle en un reintento (cupo, caída) no debe perder la
+    ejecución. Conserva el borrador anterior y lo deja en manos de una persona"""
+    issue = f"No se pudo generar un nuevo borrador ({describe_error(error)}); se muestra el anterior."
+    update = {
+        "generation_attempts": attempts,
+        "generation_failed": True,
+        "metrics": [step_metrics(f"generate{attempts}", start)],
+        "audit": {"attempt": attempts, "decision": "conservar_borrador", "error": type(error).__name__},
+    }
+    # Fuente "human": la persona acaba de pedir esta corrección y aún no está en el borrador.
+    # Si la validación rechazó después, las correcciones ya están aplicadas y se conservan
+    if verdict.source == "human":
+        issue += " La última corrección no se aplicó."
+        update["human_corrections"] = state["human_corrections"][:-1]
+    update["verdict"] = verdict.model_copy(update={"issues": [*verdict.issues, issue]})
+    return update
+
+
+RESTORED_SECTION_NAMES = {"education": "la educación", "languages": "los idiomas"}
 
 
 def review_markdown(draft: StandardCV, lang: str, source: StandardCV | None = None) -> str:

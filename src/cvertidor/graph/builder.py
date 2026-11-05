@@ -12,6 +12,8 @@
        └── [corregir, una vez] ──────────────────────────────────┤
                                                                  └─> [descartar] END
 
+    Si el modelo falla en un reintento: generate ─> human_escalation ⏸, con el borrador anterior.
+
     Con --auto, un CV aprobado pasa directo a render_and_save.
 
     Conversación sobre un CV existente (cvertidor chat):
@@ -28,6 +30,7 @@ from langgraph.runtime import Runtime
 
 from cvertidor.graph import nodes, refine
 from cvertidor.graph.edges import (
+    route_after_generate,
     route_after_human,
     route_after_memory,
     route_after_refine,
@@ -112,7 +115,7 @@ def build_graph(checkpointer=None, store=None):
     builder.add_edge("analyze_job", "plan")
     builder.add_edge("plan", "retrieve")
     builder.add_conditional_edges("retrieve", route_after_retrieve, ["retrieve", "generate"])
-    builder.add_edge("generate", "validate")
+    builder.add_conditional_edges("generate", route_after_generate, ["validate", "human_escalation"])
     builder.add_conditional_edges("validate", route_after_validate,
                                   ["human_review", "render_and_save", "generate", "judge", "human_escalation"])
     builder.add_conditional_edges("judge", route_by_verdict,
