@@ -24,8 +24,9 @@ from cvertidor.pipeline import (
     invoke_structured,
     mask_cv,
     parse_cv,
+    removal_requested,
     restore_missing_sections,
-    restore_missing_work_history,
+    restore_work_history,
     save_outputs,
     step_metrics,
 )
@@ -104,6 +105,8 @@ def ingest_cv(state: AgentState, ctx: AgentContext) -> dict:
             "input_tokens": metrics.input_tokens,
             "output_tokens": metrics.output_tokens,
             "contact_discarded": len(removed),
+            "roles": len(parsed_cv.work_history),
+            "responsibilities": sum(len(w.responsibilities) for w in parsed_cv.work_history),
         },
     }
 
@@ -259,12 +262,18 @@ def retrieve(state: AgentState, ctx: AgentContext) -> dict:
 def generate(state: AgentState, ctx: AgentContext) -> dict:
     start = time.perf_counter()
     masked_cv = mask_cv(state["parsed_cv"])[0]
-    always_included = [d for d in create_cv_documents(masked_cv, state["candidate_id"])
-                       if d.metadata["section"] in ALWAYS_INCLUDED_SECTIONS]
-    context = format_docs(state.get("retrieved_docs", []) + always_included)
+    documents = create_cv_documents(masked_cv, state["candidate_id"])
+    always_included = [d for d in documents if d.metadata["section"] in ALWAYS_INCLUDED_SECTIONS]
+    retrieved = state.get("retrieved_docs", [])
+    corrections = state.get("human_corrections", [])
+    # Una corrección puede pedir cualquier parte de la experiencia, y sin experiencia recuperada el
+    # modelo no tendría de dónde sacarla: el contexto es su única fuente
+    all_work = []
+    if corrections or not has_work_history(retrieved):
+        all_work = [d for d in documents if d.metadata["section"] == "work_history"]
+    context = format_docs(retrieved + all_work + always_included)
 
     # Las correcciones van en el contexto: así las aceptan también el modelo de decisión y el juez
-    corrections = state.get("human_corrections", [])
     if corrections:
         context += f"\n\n{CONFIRMED_HEADING}\n" + "\n".join(f"- {c}" for c in corrections)
 
@@ -289,13 +298,18 @@ def generate(state: AgentState, ctx: AgentContext) -> dict:
         return _keep_previous_draft(state, verdict, attempts, start, error)
     metrics =step_metrics("generate" if attempts == 1 else f"generate{attempts}", start, raw)
     warnings = []
-    if not corrections and restore_missing_work_history(draft, state["parsed_cv"]):
-        warnings.append("El modelo omitió toda la experiencia laboral: se agregaron los cargos, sin responsabilidades.")
-    # Una persona puede haber pedido quitar una sección
-    restored = [] if corrections else restore_missing_sections(draft, state["parsed_cv"], ALWAYS_INCLUDED_SECTIONS)
+    untranslated = " (sin traducir)" if state["plan"].translate else ""
+    # Lo que una persona pidió quitar no vuelve; lo que el modelo perdió al corregir, sí
+    restored_roles = 0
+    if not removal_requested("work_history", corrections):
+        restored_roles = restore_work_history(draft, state["parsed_cv"], retrieved)
+    if restored_roles:
+        warnings.append(f"El modelo omitió la experiencia de {restored_roles} cargo(s): "
+                        f"se copió del CV original{untranslated}.")
+    sections = [name for name in ALWAYS_INCLUDED_SECTIONS if not removal_requested(name, corrections)]
+    restored = restore_missing_sections(draft, state["parsed_cv"], sections)
     if restored:
         names = ", ".join(RESTORED_SECTION_NAMES[name] for name in restored)
-        untranslated = " (sin traducir)" if state["plan"].translate else ""
         warnings.append(f"El modelo omitió {names}: se copió del CV original{untranslated}.")
     repeated = attempts > 1 and draft == state.get("draft_cv")
     return {
@@ -311,6 +325,7 @@ def generate(state: AgentState, ctx: AgentContext) -> dict:
             "with_feedback": bool(verdict and verdict.feedback),
             "human_corrections": len(corrections),
             "restored_sections": restored,
+            "restored_responsibilities": restored_roles,
             "repeated": repeated,
             "model": metrics.model,
             "input_tokens": metrics.input_tokens,

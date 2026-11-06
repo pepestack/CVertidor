@@ -333,12 +333,43 @@ def test_experiencia_omitida_se_restaura_sin_gastar_otro_intento(fake_world, mon
         return parsed_cv.model_copy(update={"work_history": []}, deep=True), ai()
 
     monkeypatch.setattr(nodes, "generate_adapted_cv", without_roles)
+    source = fake_world["run"]().parsed_cv.work_history[0]
+    # Lo recuperado para la oferta va primero
+    fake_world["retrieval_results"][:] = [[
+        Document(page_content=f"Responsabilidades:\n- {i}", metadata={
+            "section": "work_history", "company": source.company, "role": source.role, "sub_chunk_index": i})
+        for i in (1, 0)
+    ]]
     result = fake_world["run"]()
 
     assert result.generation_attempts == 1
     assert [w.company for w in result.adapted_cv.work_history] == [w.company for w in result.parsed_cv.work_history]
-    assert all(w.responsibilities == [] for w in result.adapted_cv.work_history)
-    assert any("omitió toda la experiencia" in w for w in result.warnings)
+    assert result.adapted_cv.work_history[0].responsibilities == source.responsibilities[::-1]
+    assert any("omitió la experiencia" in w for w in result.warnings)
+
+
+def test_corregir_no_pierde_la_experiencia_salvo_que_se_pida(fake_world, monkeypatch):
+    def without_bullets(context, job_text, parsed_cv, settings, plan="", current_draft=None, human_edit=False):
+        roles = [w.model_copy(update={"responsibilities": []}) for w in parsed_cv.work_history]
+        return parsed_cv.model_copy(update={"work_history": roles}, deep=True), ai()
+
+    def without_roles(context, job_text, parsed_cv, settings, plan="", current_draft=None, human_edit=False):
+        return parsed_cv.model_copy(update={"work_history": []}, deep=True), ai()
+
+    # Un cargo que llega sin responsabilidades también se completa
+    monkeypatch.setattr(nodes, "generate_adapted_cv", without_bullets)
+    pending = fake_world["run"](auto_approve=False, thread_id="vinetas")
+    assert "Liderar el diseño" in pending.preview
+
+    # La persona pide agregar y el modelo borra la sección: no es lo que se pidió
+    monkeypatch.setattr(nodes, "generate_adapted_cv", without_roles)
+    kept = fake_world["resume"]("vinetas", "corregir", "Incluye viñetas relevantes en cada cargo")
+    assert "## Experiencia Laboral" in kept.preview and "Liderar el diseño" in kept.preview
+    # El contexto de la corrección trae toda la experiencia, aunque no se haya recuperado
+    assert "Modelos de transformación modular" in fake_world["calls"]["reviewed"][-2]
+
+    removed = fake_world["resume"]("vinetas", "corregir", "Quita la experiencia laboral")
+    assert "## Experiencia Laboral" not in removed.preview
 
 
 def test_dudoso_o_sin_modelo_de_decision_decide_el_juez(fake_world):

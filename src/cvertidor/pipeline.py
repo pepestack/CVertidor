@@ -7,11 +7,12 @@ los reintentos y los caminos alternativos.
 import hashlib
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from langchain_core.documents import Document
 from pydantic import BaseModel
 
 from cvertidor.config import Settings
@@ -19,7 +20,9 @@ from cvertidor.ingestion.pii import MaskResult, mask_pii, scrub_pii, unmask
 from cvertidor.llm.providers import StructuredOutputError, get_structured_model
 from cvertidor.prompts.generation import GENERATION_PROMPT, REVISION_BLOCK, VALIDATION_REVISION_BLOCK
 from cvertidor.prompts.parsing import PARSING_PROMPT
-from cvertidor.schemas.cv import StandardCV
+from cvertidor.schemas.cv import StandardCV, WorkExperience
+from cvertidor.text import normalize
+from cvertidor.validation.checks import MAX_RESPONSIBILITIES
 
 MIN_CV_LENGTH = 50              # Largo minimo de CV
 MIN_JOB_DESC_LENGTH = 30        # Largo minimo de oferta de trabajo
@@ -27,6 +30,22 @@ MIN_JOB_DESC_LENGTH = 30        # Largo minimo de oferta de trabajo
 # Datos de contacto: se restauran desde los marcadores y deben existir en el CV original
 CONTACT_FIELDS = ("email", "phone", "linkedin_url", "portfolio_url")
 CANDIDATE_TOKEN = "[CANDIDATO_1]"
+
+# Pedir quitar algo, salvo que venga negado ("no quites", "sin eliminar"). "borr" y "sac" van con
+# sus terminaciones para no confundirse con "borrador" o "sacrificio"
+_REMOVAL_VERB_RE = re.compile(
+    r"(?<!\bno )(?<!\bnot )(?<!\bsin )"
+    r"\b(?:quit\w*|elimin\w*|borr(?:a|ar|e|en|es)\b|sac(?:a|ar|e|en|es)\b|omit\w*|remov\w*|delet\w*|drop\w*)"
+)
+# Cómo puede nombrar una persona cada sección que el sistema restaura (texto ya normalizado)
+_SECTION_TERMS = {
+    "work_history": re.compile(
+        r"\b(?:experiencias?|laboral|cargos?|trabajos?|empleos?|responsabilidad\w*|logros?|tareas?|vinetas?"
+        r"|bullets?|experience|jobs?|roles?|responsibilit\w*)\b"
+    ),
+    "education": re.compile(r"\b(?:educacion|estudios|formacion|titulos?|education|degrees?)\b"),
+    "languages": re.compile(r"\b(?:idiomas?|languages?)\b"),
+}
 
 
 class InputError(ValueError):
@@ -166,13 +185,55 @@ def generate_adapted_cv(
     return adapted, raw
 
 
-def restore_missing_work_history(adapted: StandardCV, original: StandardCV) -> bool:
-    """Ante una oferta poco afín los modelos eliminan toda la experiencia, y una instrucción no
-    lo corrige. Empresa, cargo y fechas son hechos conocidos: se agregan sin responsabilidades"""
-    if adapted.work_history or not original.work_history:
-        return False
-    adapted.work_history = [w.model_copy(update={"responsibilities": []}) for w in original.work_history]
-    return True
+def removal_requested(section: str, corrections: list[str]) -> bool:
+    """Una persona pidió quitar esa sección o parte de ella. Una forma de pedirlo que no se detecte
+    solo deja el dato en el CV, con un aviso; lo contrario perdería datos sin que nadie lo note"""
+    terms = _SECTION_TERMS[section]
+    return any(_REMOVAL_VERB_RE.search(text) and terms.search(text) for text in map(normalize, corrections))
+
+
+def _source_role(work: WorkExperience, original: StandardCV) -> WorkExperience | None:
+    """El cargo del CV original: por empresa y, si la empresa tiene varios, también por cargo"""
+    same_company = [w for w in original.work_history if _compact(w.company) == _compact(work.company)]
+    exact = [w for w in same_company if _compact(w.role) == _compact(work.role)]
+    return next(iter(exact or same_company), None)
+
+
+def _most_relevant_responsibilities(work: WorkExperience, retrieved_docs: Sequence[Document]) -> list[str]:
+    """Primero las recuperadas para la oferta, en ese orden, y luego las demás del CV original.
+    `sub_chunk_index` es la posición entre las responsabilidades no vacías (ver chunking)"""
+    responsibilities = [r.strip() for r in work.responsibilities if r.strip()]
+    retrieved = [
+        d.metadata.get("sub_chunk_index") for d in retrieved_docs
+        if d.metadata.get("section") == "work_history"
+        and _compact(d.metadata.get("company") or "") == _compact(work.company)
+        and _compact(d.metadata.get("role") or "") == _compact(work.role)
+    ]
+    valid = [i for i in retrieved if isinstance(i, int) and 0 <= i < len(responsibilities)]
+    order = dict.fromkeys([*valid, *range(len(responsibilities))])
+    return [responsibilities[i] for i in list(order)[:MAX_RESPONSIBILITIES]]
+
+
+def restore_work_history(adapted: StandardCV, original: StandardCV, retrieved_docs: Sequence[Document] = ()) -> int:
+    """Ante una oferta poco afín los modelos eliminan la experiencia o sus responsabilidades, y una
+    instrucción no lo corrige. Todo está en el CV original: se copia lo más relevante para la oferta.
+    Un cargo omitido cuando otros sí están no se restaura: elegir qué mostrar es parte de adaptar.
+    Devuelve cuántos cargos se restauraron"""
+    if not original.work_history:
+        return 0
+    section_missing = not adapted.work_history
+    if section_missing:
+        adapted.work_history = [w.model_copy(update={"responsibilities": []}) for w in original.work_history]
+
+    filled = 0
+    for work in adapted.work_history:
+        if any(r.strip() for r in work.responsibilities):
+            continue
+        source = _source_role(work, original)
+        if source and (bullets := _most_relevant_responsibilities(source, retrieved_docs)):
+            work.responsibilities = bullets
+            filled += 1
+    return len(adapted.work_history) if section_missing else filled
 
 
 def restore_missing_sections(adapted: StandardCV, original: StandardCV, sections: list[str]) -> list[str]:

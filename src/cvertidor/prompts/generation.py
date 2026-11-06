@@ -33,7 +33,8 @@ FORMATO
 - Devuelve únicamente un objeto que cumpla el esquema StandardCV.
 - Genera un perfil profesional breve de 2–3 líneas y colócalo en el campo `professional_summary`.
 - Mantén el CV conciso y orientado a una página.
-- Máximo 3–4 responsabilidades por experiencia laboral.
+- Cada cargo incluido lleva entre 2 y 4 responsabilidades tomadas del contexto (todas las que haya, si son menos); nunca lo dejes sin ellas.
+- Conserva la sección de experiencia laboral aunque la oferta sea poco afín: elige lo más transferible.
 - Prioriza información relevante sobre información exhaustiva."""
     ),
     (
@@ -66,7 +67,7 @@ BORRADOR ACTUAL:
 {draft}
 </current_draft>
 
-Edita <current_draft> aplicando todas las correcciones confirmadas por el candidato. Conserva sin cambios todo lo demás: mismo texto, mismas secciones y mismo orden."""
+Edita <current_draft> aplicando todas las correcciones confirmadas por el candidato. Conserva sin cambios todo lo demás: mismo texto, mismas secciones y mismo orden. No quites secciones, cargos ni responsabilidades salvo que una corrección lo pida expresamente. Si una corrección pide agregar o desarrollar contenido, tómalo de <candidate_context>."""
 
 # Bloque que se agrega al final del mensaje cuando la validación rechazó el intento anterior
 VALIDATION_REVISION_BLOCK = """
