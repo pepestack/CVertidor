@@ -107,7 +107,7 @@ def build_plan(
                      + ", ".join(missing) + ".")
     if low_coverage:
         lines.append("El candidato cumple pocos requisitos obligatorios: destaca habilidades transferibles "
-                     "y formación respaldadas por el contexto.")
+                     "y formación respaldadas por el contexto, sin quitar la experiencia laboral.")
     if preferences:
         lines.append("Preferencias recordadas del usuario: " + "; ".join(preferences) + ".")
 

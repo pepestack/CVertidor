@@ -18,14 +18,17 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
     )),
     # RUT chileno: 12.345.678-9, 12345678-K
     ("RUT", re.compile(r"\b\d{1,2}\.?\d{3}\.?\d{3}-[\dkK]\b")),
-    # Teléfonos con al menos 8 dígitos: +56 9 6123 4567, (2) 2345 6789, 961234567
-    ("TELEFONO", re.compile(r"(?<![\w-])\+?\(?\d[\d\s().-]{7,}\d(?![\w-])")),
+    # Teléfonos con al menos 8 dígitos: +56 9 6123 4567, (+56) 9 6123 4567, (2) 2345 6789, 961234567.
+    # En una sola línea: dos líneas seguidas con números (fechas de un CV) no son un teléfono
+    ("TELEFONO", re.compile(r"(?<![\w-])\(?\+?\(?\d(?:[\d().-]|[^\S\r\n]){7,}\d(?![\w-])")),
 ]
 
 PLACEHOLDER_RE = re.compile(r"\[(EMAIL|URL|RUT|TELEFONO|CANDIDATO)_\d+\]")
 # Marcador de los datos de una oferta: no se restauran y no pueden confundirse con los del CV
 HIDDEN_DATA = "[DATO_OCULTO]"
-YEAR_RANGE_RE = re.compile(r"\b(?:19|20)\d{2}\s*[-–]\s*(?:19|20)\d{2}\b")
+# Solo años y separadores: "(2015 - 2020)", "2022 2015". Debe calzar el valor completo, porque un
+# teléfono real puede contener grupos que parecen años (+56 2 2012 2013)
+YEARS_ONLY_RE = re.compile(r"[\s().-]*(?:(?:19|20)\d{2}[\s().-]*){2,}")
 # Puntuación que suele quedar pegada al final de una URL o correo dentro de una frase
 TRAILING_PUNCTUATION = ".,;:)]}"
 
@@ -65,17 +68,20 @@ def mask_pii(text: str, mapping: dict[str, str] | None = None) -> MaskResult:
     for kind, pattern in PATTERNS:
         def replace(match: re.Match) -> str:
             value = match.group(0)
-            trailing = ""
+            leading = trailing = ""
             if kind in ("URL", "EMAIL"):
                 stripped = value.rstrip(TRAILING_PUNCTUATION)
                 trailing = value[len(stripped):]
                 value = stripped
             # Evita confundir fechas o rangos de años ("(2015 - 2020)") con teléfonos
-            if kind == "TELEFONO" and (_digits(value) < 8 or YEAR_RANGE_RE.search(value)):
+            if kind == "TELEFONO" and (_digits(value) < 8 or YEARS_ONLY_RE.fullmatch(value)):
                 return match.group(0)
+            # El paréntesis que envuelve al número, como en "(+56 9 1234 5678)", no es parte de él
+            if kind == "TELEFONO" and value.startswith("(") and value.count("(") > value.count(")"):
+                leading, value = "(", value[1:]
             if PLACEHOLDER_RE.fullmatch(value):
                 return match.group(0)
-            return placeholder_for(kind, value) + trailing
+            return leading + placeholder_for(kind, value) + trailing
 
         text = pattern.sub(replace, text)
 
